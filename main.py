@@ -47,6 +47,16 @@ from pack_builder import build_pack
 logger = logging.getLogger(__name__)
 
 
+class EncryptedROMError(Exception):
+    """Raised when the ROM is encrypted and cannot be processed."""
+    pass
+
+
+class ROMParseError(Exception):
+    """Raised when the ROM format cannot be determined or parsed."""
+    pass
+
+
 def setup_logging(verbose: bool = False, quiet: bool = False):
     level = logging.ERROR if quiet else (logging.DEBUG if verbose else logging.INFO)
     logging.basicConfig(level=level, format="%(levelname)s: %(message)s", stream=sys.stderr)
@@ -99,12 +109,17 @@ def parse_rom(input_path: str) -> Tuple[bytes, str, str, str]:
                 ncch_data = cia.get_content(0)
                 chain = "CIA/content0/NCCH"
             except Exception:
-                raise ValueError(f"Cannot determine ROM format: {input_path}")
+                raise ROMParseError(f"Cannot determine ROM format: {input_path}")
 
     if ncch_data is None:
-        raise ValueError("Failed to extract NCCH data")
+        raise ROMParseError("Failed to extract NCCH data")
 
-    ncch = NCCHParser(ncch_data)
+    try:
+        ncch = NCCHParser(ncch_data)
+    except RuntimeError as e:
+        if "encrypted" in str(e).lower():
+            raise EncryptedROMError(str(e))
+        raise ROMParseError(str(e))
     if title_id == 0:
         title_id = ncch.title_id
     product_code = ncch.product_code
@@ -189,8 +204,8 @@ def cmd_scan(args):
 # EXTRACT subcommand
 # ──────────────────────────────────────────────
 
-def cmd_extract(args):
-    setup_logging(args.verbose, args.quiet)
+def cmd_extract(args, progress_callback=None):
+    setup_logging(args.verbose, getattr(args, 'quiet', False))
     t0 = time.time()
 
     romfs_data, title_id, product_code, chain = parse_rom(args.input)
@@ -229,6 +244,8 @@ def cmd_extract(args):
             continue
 
         files_scanned += 1
+        if progress_callback:
+            progress_callback(files_scanned, len(files), file_path, "", 0, 0)
         try:
             _, file_data = romfs.read_file_by_index(file_idx)
         except Exception as e:
@@ -407,6 +424,8 @@ def cmd_extract(args):
     if cs_path:
         print(f"  Contact sheet:          {cs_path}")
     print(f"{'='*56}")
+
+    return summary, records, failures
 
 
 # ──────────────────────────────────────────────
@@ -736,6 +755,12 @@ def main():
     if handler:
         try:
             handler(args)
+        except EncryptedROMError as e:
+            logger.error(str(e))
+            sys.exit(1)
+        except ROMParseError as e:
+            logger.error(str(e))
+            sys.exit(1)
         except RuntimeError as e:
             logger.error(str(e))
             sys.exit(1)
