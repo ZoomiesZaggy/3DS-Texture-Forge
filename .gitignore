@@ -1,0 +1,8 @@
+__pycache__/
+build/
+dist/
+out/
+*.spec
+*.png
+debug_*.py
+dump_blocks.py
