@@ -1,82 +1,77 @@
 """
-3DS Texture Forge — PySide6 GUI for 3ds-tex-extract.
+3DS Texture Forge — PySide6 GUI.
 
-Single-window dark-themed application for extracting textures
-from decrypted Nintendo 3DS ROMs.
+Grandma-proof: step-by-step flow, giant drop zone, one big button.
 """
 
 import logging
 import os
-import subprocess
+import re
 import sys
 from typing import Optional
 
-from PySide6.QtCore import Qt, QThread, Signal, QUrl
+from PySide6.QtCore import Qt, QThread, Signal, QUrl, QMimeData, QTimer
 from PySide6.QtGui import (
     QColor, QDesktopServices, QDragEnterEvent, QDropEvent,
-    QFont, QPalette, QPixmap, QAction,
+    QFont, QPalette, QPixmap, QPainter, QPen, QAction, QCursor,
 )
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QFileDialog, QGroupBox, QHBoxLayout,
-    QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
-    QProgressBar, QPushButton, QScrollArea, QVBoxLayout, QWidget,
-    QSizePolicy,
+    QApplication, QCheckBox, QFileDialog, QFrame, QGridLayout, QGroupBox,
+    QHBoxLayout, QLabel, QLineEdit, QMainWindow, QPlainTextEdit,
+    QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSpacerItem,
+    QVBoxLayout, QWidget, QDialog, QTextBrowser,
 )
 
 from config import load_config, save_config
-from backend import scan_rom, run_extraction, get_output_previews
+from backend import scan_rom, run_extraction, get_output_previews, get_game_name
 
 logger = logging.getLogger(__name__)
 
 
 # ──────────────────────────────────────────────
-# Logging handler that routes to a signal
+# Constants
+# ──────────────────────────────────────────────
+
+COL_BG = "#2d2d30"
+COL_BG_DARKER = "#1e1e1e"
+COL_TEXT = "#d4d4d4"
+COL_TEXT_DIM = "#808080"
+COL_ACCENT = "#2a82da"
+COL_ACCENT_HOVER = "#3a92ea"
+COL_GREEN = "#4ec96b"
+COL_GREEN_DIM = "#2a6b3a"
+COL_RED = "#ff6b6b"
+COL_ORANGE = "#ffaa44"
+COL_BORDER = "#555555"
+COL_DROP_BORDER = "#888888"
+COL_DROP_HOVER = "#2a82da"
+
+
+# ──────────────────────────────────────────────
+# Logging handler
 # ──────────────────────────────────────────────
 
 class SignalLogHandler(logging.Handler):
-    """Logging handler that emits records via a callback."""
-
     def __init__(self, callback):
         super().__init__()
         self.callback = callback
 
     def emit(self, record):
         try:
-            msg = self.format(record)
-            self.callback(msg)
+            self.callback(self.format(record))
         except Exception:
             pass
 
 
 # ──────────────────────────────────────────────
-# Worker threads
+# Worker: combined scan + extract in one step
 # ──────────────────────────────────────────────
-
-class ScanWorker(QThread):
-    finished = Signal(dict)
-    log_message = Signal(str)
-
-    def __init__(self, filepath: str):
-        super().__init__()
-        self.filepath = filepath
-
-    def run(self):
-        self.log_message.emit(f"Scanning: {os.path.basename(self.filepath)}")
-        result = scan_rom(self.filepath)
-        if result["success"]:
-            self.log_message.emit(
-                f"Scan complete: {result['product_code']} | "
-                f"{result['title_id']} | {result['file_count']} files"
-            )
-        else:
-            self.log_message.emit(f"Scan failed: {result['error_message']}")
-        self.finished.emit(result)
-
 
 class ExtractWorker(QThread):
     finished = Signal(dict)
     progress = Signal(int, int, str)
     log_message = Signal(str)
+    phase_changed = Signal(str)
 
     def __init__(self, filepath: str, output_dir: str, options: dict):
         super().__init__()
@@ -88,20 +83,38 @@ class ExtractWorker(QThread):
         self.progress.emit(current, total, file_path)
 
     def run(self):
-        self.log_message.emit(f"Extracting: {os.path.basename(self.filepath)}")
-        self.log_message.emit(f"Output: {self.output_dir}")
+        self.phase_changed.emit("Loading ROM...")
+        self.log_message.emit(f"Loading: {os.path.basename(self.filepath)}")
+
+        # Phase 1: scan
+        scan_result = scan_rom(self.filepath)
+        if not scan_result["success"]:
+            result = {
+                "success": False,
+                "error_message": scan_result["error_message"],
+                "is_encrypted": scan_result.get("is_encrypted", False),
+                "scan_result": scan_result,
+            }
+            self.finished.emit(result)
+            return
+
+        game_name = get_game_name(
+            scan_result.get("title_id", ""),
+            scan_result.get("product_code", ""),
+        )
+        self.phase_changed.emit(f"Extracting textures from {game_name}...")
+        self.log_message.emit(
+            f"ROM: {game_name} | {scan_result['product_code']} | "
+            f"{scan_result['file_count']} files"
+        )
+
+        # Phase 2: extract
         result = run_extraction(
             self.filepath, self.output_dir, self.options,
             progress_callback=self._on_progress,
         )
-        if result["success"]:
-            s = result.get("summary", {})
-            self.log_message.emit(
-                f"Extraction complete: {s.get('textures_decoded_ok', 0)} textures, "
-                f"{s.get('textures_failed', 0)} failed, {result['elapsed']}s"
-            )
-        else:
-            self.log_message.emit(f"Extraction failed: {result['error_message']}")
+        result["scan_result"] = scan_result
+        result["game_name"] = game_name
         self.finished.emit(result)
 
 
@@ -110,7 +123,6 @@ class ExtractWorker(QThread):
 # ──────────────────────────────────────────────
 
 def apply_dark_palette(app: QApplication):
-    """Apply a dark color palette to the application."""
     palette = QPalette()
     palette.setColor(QPalette.ColorRole.Window, QColor(45, 45, 48))
     palette.setColor(QPalette.ColorRole.WindowText, QColor(212, 212, 212))
@@ -125,10 +137,291 @@ def apply_dark_palette(app: QApplication):
     palette.setColor(QPalette.ColorRole.Link, QColor(42, 130, 218))
     palette.setColor(QPalette.ColorRole.Highlight, QColor(42, 130, 218))
     palette.setColor(QPalette.ColorRole.HighlightedText, QColor(255, 255, 255))
-    palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text, QColor(128, 128, 128))
-    palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText, QColor(128, 128, 128))
+    palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text,
+                     QColor(128, 128, 128))
+    palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText,
+                     QColor(128, 128, 128))
     app.setPalette(palette)
     app.setStyle("Fusion")
+
+
+# ──────────────────────────────────────────────
+# Drop Zone widget
+# ──────────────────────────────────────────────
+
+class DropZone(QFrame):
+    """Large drag-and-drop target that also responds to clicks."""
+
+    file_dropped = Signal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+        self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.setMinimumHeight(130)
+        self._hovering = False
+        self._loaded_file = ""
+        self._game_info = ""
+        self._update_style(False)
+
+    def _update_style(self, hover: bool):
+        if self._loaded_file:
+            self.setStyleSheet(f"""
+                DropZone {{
+                    background: {COL_BG_DARKER};
+                    border: 2px solid {COL_GREEN_DIM};
+                    border-radius: 8px;
+                }}
+            """)
+        elif hover:
+            self.setStyleSheet(f"""
+                DropZone {{
+                    background: #1a3a5a;
+                    border: 2px dashed {COL_DROP_HOVER};
+                    border-radius: 8px;
+                }}
+            """)
+        else:
+            self.setStyleSheet(f"""
+                DropZone {{
+                    background: {COL_BG_DARKER};
+                    border: 2px dashed {COL_DROP_BORDER};
+                    border-radius: 8px;
+                }}
+            """)
+
+    def set_loaded(self, filepath: str, game_info: str = ""):
+        self._loaded_file = filepath
+        self._game_info = game_info
+        self._update_style(False)
+        self.update()
+
+    def clear(self):
+        self._loaded_file = ""
+        self._game_info = ""
+        self._update_style(False)
+        self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        rect = self.rect()
+
+        if self._loaded_file:
+            # Show loaded file info
+            fname = os.path.basename(self._loaded_file)
+
+            # Checkmark
+            painter.setPen(QPen(QColor(COL_GREEN), 2))
+            font_big = QFont("Segoe UI", 13, QFont.Weight.Bold)
+            painter.setFont(font_big)
+            painter.drawText(rect.adjusted(0, 20, 0, -40),
+                             Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
+                             f"  {fname}")
+
+            if self._game_info:
+                painter.setPen(QColor(COL_TEXT_DIM))
+                font_sm = QFont("Segoe UI", 10)
+                painter.setFont(font_sm)
+                painter.drawText(rect.adjusted(0, 50, 0, -10),
+                                 Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
+                                 self._game_info)
+
+            # Small "click to change" hint
+            painter.setPen(QColor(COL_TEXT_DIM))
+            font_xs = QFont("Segoe UI", 9)
+            painter.setFont(font_xs)
+            painter.drawText(rect.adjusted(0, 0, 0, -10),
+                             Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom,
+                             "Click or drop to change file")
+        else:
+            # Empty state
+            painter.setPen(QColor(COL_TEXT_DIM))
+            font_main = QFont("Segoe UI", 14)
+            painter.setFont(font_main)
+            painter.drawText(rect.adjusted(0, 25, 0, -30),
+                             Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
+                             "Drop your .3ds or .cia ROM file here")
+
+            font_sub = QFont("Segoe UI", 10)
+            painter.setFont(font_sub)
+            painter.drawText(rect.adjusted(0, 55, 0, -10),
+                             Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
+                             "or click to browse")
+
+        painter.end()
+
+    def mousePressEvent(self, event):
+        self.file_dropped.emit("")  # Signal parent to open browse dialog
+
+    def dragEnterEvent(self, event: QDragEnterEvent):
+        if event.mimeData().hasUrls():
+            for url in event.mimeData().urls():
+                path = url.toLocalFile().lower()
+                if path.endswith((".3ds", ".cia", ".cxi", ".app")):
+                    event.acceptProposedAction()
+                    self._hovering = True
+                    self._update_style(True)
+                    return
+
+    def dragLeaveEvent(self, event):
+        self._hovering = False
+        self._update_style(False)
+
+    def dropEvent(self, event: QDropEvent):
+        self._hovering = False
+        self._update_style(False)
+        for url in event.mimeData().urls():
+            path = url.toLocalFile()
+            if path.lower().endswith((".3ds", ".cia", ".cxi", ".app")):
+                self.file_dropped.emit(path)
+                return
+        # Non-ROM file dropped
+        self.file_dropped.emit(event.mimeData().urls()[0].toLocalFile()
+                               if event.mimeData().urls() else "")
+
+
+# ──────────────────────────────────────────────
+# Collapsible section
+# ──────────────────────────────────────────────
+
+class CollapsibleSection(QWidget):
+    def __init__(self, title: str, parent=None):
+        super().__init__(parent)
+        self._expanded = False
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self._toggle_btn = QPushButton(f"  {title}")
+        self._toggle_btn.setStyleSheet(f"""
+            QPushButton {{
+                text-align: left;
+                background: transparent;
+                border: none;
+                color: {COL_TEXT_DIM};
+                font-size: 12px;
+                padding: 6px 4px;
+            }}
+            QPushButton:hover {{
+                color: {COL_TEXT};
+            }}
+        """)
+        self._toggle_btn.clicked.connect(self.toggle)
+        layout.addWidget(self._toggle_btn)
+
+        self._content = QWidget()
+        self._content.setVisible(False)
+        self._content_layout = QVBoxLayout(self._content)
+        self._content_layout.setContentsMargins(16, 4, 0, 8)
+        layout.addWidget(self._content)
+
+        self._title = title
+
+    def content_layout(self):
+        return self._content_layout
+
+    def toggle(self):
+        self._expanded = not self._expanded
+        self._content.setVisible(self._expanded)
+        arrow = "" if self._expanded else ""
+        self._toggle_btn.setText(f"{arrow}  {self._title}")
+
+    def set_expanded(self, expanded: bool):
+        self._expanded = expanded
+        self._content.setVisible(expanded)
+        arrow = "" if self._expanded else ""
+        self._toggle_btn.setText(f"{arrow}  {self._title}")
+
+
+# ──────────────────────────────────────────────
+# Step indicator
+# ──────────────────────────────────────────────
+
+class StepLabel(QLabel):
+    """A numbered step label that can be active, done, or dimmed."""
+
+    def __init__(self, number: int, text: str, parent=None):
+        super().__init__(parent)
+        self._number = number
+        self._text = text
+        self._state = "upcoming"  # "upcoming", "active", "done"
+        self._render()
+
+    def set_state(self, state: str):
+        self._state = state
+        self._render()
+
+    def _render(self):
+        num = self._number
+        if self._state == "done":
+            circle = f'<span style="color:{COL_GREEN}; font-size:15px;">&#10004;</span>'
+            color = COL_TEXT_DIM
+        elif self._state == "active":
+            circle = f'<span style="color:{COL_ACCENT}; font-size:15px; font-weight:bold;">{num}</span>'
+            color = COL_TEXT
+        else:
+            circle = f'<span style="color:{COL_TEXT_DIM}; font-size:15px;">{num}</span>'
+            color = COL_TEXT_DIM
+
+        self.setText(
+            f'<span style="font-size:13px;">{circle}</span>'
+            f'&nbsp;&nbsp;'
+            f'<span style="color:{color}; font-size:13px;">{self._text}</span>'
+        )
+
+
+# ──────────────────────────────────────────────
+# About dialog
+# ──────────────────────────────────────────────
+
+class AboutDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("About 3DS Texture Forge")
+        self.setFixedSize(480, 420)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 24, 24, 24)
+
+        text = QTextBrowser()
+        text.setOpenExternalLinks(True)
+        text.setStyleSheet(f"background: {COL_BG_DARKER}; border: none; color: {COL_TEXT};")
+        text.setHtml(f"""
+            <h2 style="color:{COL_TEXT};">3DS Texture Forge v1.0</h2>
+            <p>Extracts textures from decrypted Nintendo 3DS game ROMs.
+            Textures are saved as PNG files organized by source.</p>
+
+            <p><b>Tested games:</b></p>
+            <table cellspacing="4">
+            <tr><td style="color:{COL_GREEN};">&#10004;</td>
+                <td>Resident Evil: Revelations</td><td style="color:{COL_TEXT_DIM};">1,137 textures</td></tr>
+            <tr><td style="color:{COL_GREEN};">&#10004;</td>
+                <td>Corpse Party</td><td style="color:{COL_TEXT_DIM};">2,781 textures</td></tr>
+            <tr><td style="color:{COL_GREEN};">&#10004;</td>
+                <td>Pokemon Y</td><td style="color:{COL_TEXT_DIM};">8,015 textures</td></tr>
+            <tr><td style="color:{COL_GREEN};">&#10004;</td>
+                <td>Mario Kart 7</td><td style="color:{COL_TEXT_DIM};">2,770 textures</td></tr>
+            <tr><td style="color:{COL_GREEN};">&#10004;</td>
+                <td>Zelda: Ocarina of Time 3D</td><td style="color:{COL_TEXT_DIM};">3,584 textures</td></tr>
+            </table>
+
+            <p style="margin-top:12px;"><b>For Azahar/Citra custom textures:</b><br>
+            Use the emulator's texture dump feature to get hash-based filenames,
+            then replace them with these extracted textures.</p>
+
+            <p style="margin-top:12px;">
+            <a href="https://github.com/ZoomiesZaggy/3DS-Texture-Forge">
+            github.com/ZoomiesZaggy/3DS-Texture-Forge</a></p>
+        """)
+        layout.addWidget(text)
+
+        btn_close = QPushButton("Close")
+        btn_close.clicked.connect(self.close)
+        layout.addWidget(btn_close, alignment=Qt.AlignmentFlag.AlignRight)
 
 
 # ──────────────────────────────────────────────
@@ -139,71 +432,32 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.cfg = load_config()
-        self.scan_result = None
-        self.extract_result = None
         self.worker = None
+        self._loaded_path = ""
+        self._scan_result = None
+        self._game_name = ""
 
         self.setWindowTitle("3DS Texture Forge")
-        self.setMinimumSize(960, 680)
+        self.setMinimumSize(800, 600)
         self.resize(self.cfg.get("window_width", 1000),
                     self.cfg.get("window_height", 720))
         self.setAcceptDrops(True)
 
-        self._build_menu()
         self._build_ui()
         self._setup_logging()
-
-        # Restore last paths
-        if self.cfg.get("last_input_path"):
-            self.input_path.setText(self.cfg["last_input_path"])
-        if self.cfg.get("last_output_path"):
-            self.output_path.setText(self.cfg["last_output_path"])
-
-        self.chk_scan_all.setChecked(self.cfg.get("scan_all_files", False))
-        self.chk_dump_raw.setChecked(self.cfg.get("dump_raw", False))
-        self.chk_verbose.setChecked(self.cfg.get("verbose_logging", False))
-
-    # ── Menu ──
-
-    def _build_menu(self):
-        menu_bar = self.menuBar()
-        help_menu = menu_bar.addMenu("Help")
-        about_action = QAction("About", self)
-        about_action.triggered.connect(self._show_about)
-        help_menu.addAction(about_action)
-
-    def _show_about(self):
-        QMessageBox.about(self, "About 3DS Texture Forge",
-            "3DS Texture Forge v1.0\n\n"
-            "Extracts textures from decrypted 3DS game ROMs for use with "
-            "the Azahar emulator.\n\n"
-            "Known limitations:\n"
-            "  - Requires decrypted ROM input\n"
-            "  - Best tested with Resident Evil: Revelations\n"
-            "  - Some Capcom TEX header variants may not parse correctly\n"
-            "  - BCH texture extraction uses heuristic scanning\n"
-            "  - Not all games' texture formats are supported yet\n\n"
-            "Textures are extracted to PNG. To use them as Azahar custom "
-            "textures, you will need to match them to the hash-based "
-            "filenames Azahar expects (use Azahar's built-in texture "
-            "dumping feature for this step)."
-        )
+        self._update_steps("idle")
 
     # ── Logging ──
 
     def _setup_logging(self):
-        handler = SignalLogHandler(self._append_log_safe)
+        handler = SignalLogHandler(self._log_from_handler)
         handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
         logging.root.addHandler(handler)
         logging.root.setLevel(logging.INFO)
 
-    def _append_log_safe(self, msg: str):
-        # May be called from worker thread — use thread-safe approach
+    def _log_from_handler(self, msg: str):
         if QThread.currentThread() == QApplication.instance().thread():
             self._append_log(msg)
-        else:
-            # Queue via signal; we'll use the worker's log_message signal instead
-            pass
 
     def _append_log(self, msg: str):
         self.log_box.appendPlainText(msg)
@@ -215,140 +469,347 @@ class MainWindow(QMainWindow):
     def _build_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
-        layout = QVBoxLayout(central)
-        layout.setSpacing(8)
+        main_layout = QVBoxLayout(central)
+        main_layout.setContentsMargins(24, 16, 24, 12)
+        main_layout.setSpacing(6)
 
-        # Section 1: Input
-        grp_input = QGroupBox("Input ROM")
-        vl = QVBoxLayout(grp_input)
-        hl = QHBoxLayout()
-        self.input_path = QLineEdit()
-        self.input_path.setPlaceholderText(
-            "Drop a .3ds or .cia file here, or click Browse...")
-        self.input_path.setReadOnly(True)
-        hl.addWidget(self.input_path)
-        btn_browse_input = QPushButton("Browse...")
-        btn_browse_input.clicked.connect(self._browse_input)
-        hl.addWidget(btn_browse_input)
-        vl.addLayout(hl)
-        self.lbl_rom_info = QLabel("No file loaded")
-        self.lbl_rom_info.setStyleSheet("color: gray; font-style: italic;")
-        vl.addWidget(self.lbl_rom_info)
-        layout.addWidget(grp_input)
-
-        # Section 2: Output
-        grp_output = QGroupBox("Output Folder")
-        vl2 = QVBoxLayout(grp_output)
-        hl2 = QHBoxLayout()
-        self.output_path = QLineEdit()
-        self.output_path.setPlaceholderText("Output directory for extracted textures")
-        hl2.addWidget(self.output_path)
-        btn_browse_output = QPushButton("Browse...")
-        btn_browse_output.clicked.connect(self._browse_output)
-        hl2.addWidget(btn_browse_output)
-        self.btn_open_folder = QPushButton("Open Output Folder")
-        self.btn_open_folder.setEnabled(False)
-        self.btn_open_folder.clicked.connect(self._open_output_folder)
-        hl2.addWidget(self.btn_open_folder)
-        vl2.addLayout(hl2)
-        layout.addWidget(grp_output)
-
-        # Section 3: Actions
-        grp_actions = QGroupBox("Actions")
-        vl3 = QVBoxLayout(grp_actions)
-        hl3 = QHBoxLayout()
-
-        self.btn_scan = QPushButton("Scan")
-        self.btn_scan.setToolTip("Load ROM and report file count (fast)")
-        self.btn_scan.clicked.connect(self._do_scan)
-        hl3.addWidget(self.btn_scan)
-
-        self.btn_extract = QPushButton("  Extract Textures  ")
-        self.btn_extract.setToolTip("Full extraction pipeline")
-        self.btn_extract.setStyleSheet(
-            "QPushButton { background-color: #2a82da; color: white; "
-            "font-weight: bold; padding: 6px 16px; }"
-            "QPushButton:hover { background-color: #3a92ea; }"
-            "QPushButton:disabled { background-color: #555; color: #888; }"
+        # ── Title bar area ──
+        title_bar = QHBoxLayout()
+        title_lbl = QLabel(
+            f'<span style="color:{COL_TEXT}; font-size:18px; font-weight:bold;">'
+            f'3DS Texture Forge</span>'
         )
+        title_bar.addWidget(title_lbl)
+        title_bar.addStretch()
+        self.btn_about = QPushButton("About")
+        self.btn_about.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; border: none;
+                color: {COL_TEXT_DIM}; font-size: 12px;
+                padding: 4px 8px;
+            }}
+            QPushButton:hover {{ color: {COL_ACCENT}; }}
+        """)
+        self.btn_about.clicked.connect(self._show_about)
+        title_bar.addWidget(self.btn_about)
+        main_layout.addLayout(title_bar)
+
+        # ── Separator ──
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet(f"color: {COL_BORDER};")
+        main_layout.addWidget(sep)
+        main_layout.addSpacing(4)
+
+        # ── How to Use header ──
+        how_lbl = QLabel(
+            f'<span style="color:{COL_TEXT_DIM}; font-size:11px; '
+            f'letter-spacing:2px;">HOW TO USE</span>'
+        )
+        main_layout.addWidget(how_lbl)
+        main_layout.addSpacing(2)
+
+        # ── Step 1 ──
+        self.step1 = StepLabel(1, "Get a decrypted .3ds or .cia ROM file")
+        main_layout.addWidget(self.step1)
+        hint1 = QLabel(
+            f'<span style="color:{COL_TEXT_DIM}; font-size:11px;">'
+            f'&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;'
+            f'You need a legally dumped ROM decrypted with GodMode9</span>'
+        )
+        main_layout.addWidget(hint1)
+        main_layout.addSpacing(2)
+
+        # ── Step 2 + Drop Zone ──
+        self.step2 = StepLabel(2, "Drop your ROM file here")
+        main_layout.addWidget(self.step2)
+        main_layout.addSpacing(4)
+
+        self.drop_zone = DropZone()
+        self.drop_zone.file_dropped.connect(self._on_file_dropped)
+        main_layout.addWidget(self.drop_zone)
+        main_layout.addSpacing(4)
+
+        # ── Step 3 + Extract button ──
+        self.step3 = StepLabel(3, "Click Extract and wait")
+        main_layout.addWidget(self.step3)
+        main_layout.addSpacing(4)
+
+        # Extract button + output path row
+        action_row = QHBoxLayout()
+        self.btn_extract = QPushButton("   EXTRACT TEXTURES   ")
+        self.btn_extract.setMinimumHeight(44)
+        self.btn_extract.setEnabled(False)
+        self.btn_extract.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {COL_ACCENT};
+                color: white;
+                font-weight: bold;
+                font-size: 14px;
+                padding: 8px 32px;
+                border-radius: 6px;
+                border: none;
+            }}
+            QPushButton:hover {{
+                background-color: {COL_ACCENT_HOVER};
+            }}
+            QPushButton:disabled {{
+                background-color: #3a3a3d;
+                color: {COL_TEXT_DIM};
+            }}
+        """)
         self.btn_extract.clicked.connect(self._do_extract)
-        hl3.addWidget(self.btn_extract)
+        action_row.addWidget(self.btn_extract)
+        action_row.addStretch()
+        main_layout.addLayout(action_row)
 
-        self.btn_manifest = QPushButton("Open Manifest")
-        self.btn_manifest.setEnabled(False)
-        self.btn_manifest.clicked.connect(self._open_manifest)
-        hl3.addWidget(self.btn_manifest)
+        # Output path (shown after file loaded)
+        self.output_row = QWidget()
+        output_hl = QHBoxLayout(self.output_row)
+        output_hl.setContentsMargins(0, 0, 0, 0)
+        self.lbl_output = QLabel(
+            f'<span style="color:{COL_TEXT_DIM}; font-size:11px;">Output:</span>'
+        )
+        output_hl.addWidget(self.lbl_output)
+        self.lbl_output_path = QLabel("")
+        self.lbl_output_path.setStyleSheet(f"color: {COL_TEXT}; font-size: 11px;")
+        output_hl.addWidget(self.lbl_output_path)
+        self.btn_change_output = QPushButton("Change")
+        self.btn_change_output.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; border: none;
+                color: {COL_ACCENT}; font-size: 11px;
+                padding: 2px 6px;
+            }}
+            QPushButton:hover {{ text-decoration: underline; }}
+        """)
+        self.btn_change_output.clicked.connect(self._browse_output)
+        output_hl.addWidget(self.btn_change_output)
+        output_hl.addStretch()
+        self.output_row.setVisible(False)
+        main_layout.addWidget(self.output_row)
 
-        hl3.addStretch()
-        vl3.addLayout(hl3)
-
-        hl_opts = QHBoxLayout()
-        self.chk_scan_all = QCheckBox("Deep scan (brute-force all files)")
-        hl_opts.addWidget(self.chk_scan_all)
-        self.chk_dump_raw = QCheckBox("Save raw texture data (.bin)")
-        hl_opts.addWidget(self.chk_dump_raw)
-        self.chk_verbose = QCheckBox("Verbose logging")
-        hl_opts.addWidget(self.chk_verbose)
-        hl_opts.addStretch()
-        vl3.addLayout(hl_opts)
-        layout.addWidget(grp_actions)
-
-        # Section 4: Progress
-        grp_progress = QGroupBox("Progress")
-        vl4 = QVBoxLayout(grp_progress)
+        # Progress bar (hidden until extracting)
         self.progress_bar = QProgressBar()
-        self.progress_bar.setValue(0)
-        vl4.addWidget(self.progress_bar)
-        self.lbl_status = QLabel("Ready.")
-        vl4.addWidget(self.lbl_status)
+        self.progress_bar.setVisible(False)
+        self.progress_bar.setMaximumHeight(18)
+        self.progress_bar.setStyleSheet(f"""
+            QProgressBar {{
+                background: {COL_BG_DARKER};
+                border: 1px solid {COL_BORDER};
+                border-radius: 4px;
+                text-align: center;
+                color: {COL_TEXT};
+                font-size: 11px;
+            }}
+            QProgressBar::chunk {{
+                background: {COL_ACCENT};
+                border-radius: 3px;
+            }}
+        """)
+        main_layout.addWidget(self.progress_bar)
+
+        self.lbl_progress_text = QLabel("")
+        self.lbl_progress_text.setStyleSheet(f"color: {COL_TEXT_DIM}; font-size: 11px;")
+        self.lbl_progress_text.setVisible(False)
+        main_layout.addWidget(self.lbl_progress_text)
+
+        main_layout.addSpacing(4)
+
+        # ── Step 4 + Results ──
+        self.step4 = StepLabel(4, "Get your textures")
+        main_layout.addWidget(self.step4)
+        main_layout.addSpacing(4)
+
+        # Results panel (hidden until extraction complete)
+        self.results_panel = QFrame()
+        self.results_panel.setStyleSheet(f"""
+            QFrame {{
+                background: {COL_BG_DARKER};
+                border: 1px solid {COL_BORDER};
+                border-radius: 8px;
+            }}
+        """)
+        self.results_panel.setVisible(False)
+        results_layout = QVBoxLayout(self.results_panel)
+        results_layout.setContentsMargins(16, 12, 16, 12)
+        results_layout.setSpacing(8)
+
+        self.lbl_results_headline = QLabel("")
+        self.lbl_results_headline.setStyleSheet(f"font-size: 14px; font-weight: bold; border: none;")
+        results_layout.addWidget(self.lbl_results_headline)
+
+        self.lbl_results_detail = QLabel("")
+        self.lbl_results_detail.setStyleSheet(f"color: {COL_TEXT_DIM}; font-size: 11px; border: none;")
+        self.lbl_results_detail.setVisible(False)
+        results_layout.addWidget(self.lbl_results_detail)
+
+        # Action buttons row
+        btn_row = QHBoxLayout()
+        self.btn_open_folder = QPushButton("   Open Output Folder   ")
+        self.btn_open_folder.setMinimumHeight(36)
+        self.btn_open_folder.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {COL_GREEN_DIM};
+                color: white;
+                font-weight: bold;
+                font-size: 12px;
+                padding: 6px 20px;
+                border-radius: 5px;
+                border: none;
+            }}
+            QPushButton:hover {{
+                background-color: {COL_GREEN};
+                color: black;
+            }}
+        """)
+        self.btn_open_folder.clicked.connect(self._open_output_folder)
+        btn_row.addWidget(self.btn_open_folder)
+
+        self.btn_manifest = QPushButton("   View Manifest   ")
+        self.btn_manifest.setMinimumHeight(36)
+        self.btn_manifest.setStyleSheet(f"""
+            QPushButton {{
+                background-color: #3a3a3d;
+                color: {COL_TEXT};
+                font-size: 12px;
+                padding: 6px 16px;
+                border-radius: 5px;
+                border: 1px solid {COL_BORDER};
+            }}
+            QPushButton:hover {{
+                background-color: #4a4a4d;
+            }}
+        """)
+        self.btn_manifest.clicked.connect(self._open_manifest)
+        btn_row.addWidget(self.btn_manifest)
+        btn_row.addStretch()
+        results_layout.addLayout(btn_row)
+
+        # Thumbnail area
+        self.thumb_scroll = QScrollArea()
+        self.thumb_scroll.setWidgetResizable(True)
+        self.thumb_scroll.setMinimumHeight(80)
+        self.thumb_scroll.setMaximumHeight(120)
+        self.thumb_scroll.setStyleSheet(f"background: transparent; border: none;")
+        self.thumb_widget = QWidget()
+        self.thumb_widget.setStyleSheet("border: none;")
+        self.thumb_layout = QHBoxLayout(self.thumb_widget)
+        self.thumb_layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self.thumb_layout.setSpacing(6)
+        self.thumb_scroll.setWidget(self.thumb_widget)
+        results_layout.addWidget(self.thumb_scroll)
+
+        main_layout.addWidget(self.results_panel)
+
+        # ── Error panel (hidden) ──
+        self.error_panel = QFrame()
+        self.error_panel.setStyleSheet(f"""
+            QFrame {{
+                background: #3a1a1a;
+                border: 1px solid {COL_RED};
+                border-radius: 8px;
+            }}
+        """)
+        self.error_panel.setVisible(False)
+        error_layout = QVBoxLayout(self.error_panel)
+        error_layout.setContentsMargins(16, 12, 16, 12)
+        self.lbl_error = QLabel("")
+        self.lbl_error.setWordWrap(True)
+        self.lbl_error.setStyleSheet(f"color: {COL_TEXT}; font-size: 12px; border: none;")
+        error_layout.addWidget(self.lbl_error)
+        main_layout.addWidget(self.error_panel)
+
+        main_layout.addStretch()
+
+        # ── Advanced Options (collapsed) ──
+        self.advanced_section = CollapsibleSection("Advanced Options")
+        adv_layout = self.advanced_section.content_layout()
+        self.chk_scan_all = QCheckBox("Deep scan — Try harder to find textures (slower)")
+        self.chk_scan_all.setStyleSheet(f"color: {COL_TEXT}; font-size: 11px;")
+        adv_layout.addWidget(self.chk_scan_all)
+        self.chk_dump_raw = QCheckBox("Save raw data — Also save undecoded texture files")
+        self.chk_dump_raw.setStyleSheet(f"color: {COL_TEXT}; font-size: 11px;")
+        adv_layout.addWidget(self.chk_dump_raw)
+        self.chk_verbose = QCheckBox("Verbose log — Show detailed extraction log")
+        self.chk_verbose.setStyleSheet(f"color: {COL_TEXT}; font-size: 11px;")
+        adv_layout.addWidget(self.chk_verbose)
+        main_layout.addWidget(self.advanced_section)
+
+        # ── Extraction Log (collapsed) ──
+        self.log_section = CollapsibleSection("Extraction Log")
+        log_layout = self.log_section.content_layout()
         self.log_box = QPlainTextEdit()
         self.log_box.setReadOnly(True)
         self.log_box.setFont(QFont("Consolas", 9))
-        self.log_box.setMaximumHeight(160)
-        vl4.addWidget(self.log_box)
-        layout.addWidget(grp_progress)
+        self.log_box.setMaximumHeight(140)
+        self.log_box.setStyleSheet(f"""
+            QPlainTextEdit {{
+                background: {COL_BG_DARKER};
+                border: 1px solid {COL_BORDER};
+                border-radius: 4px;
+                color: {COL_TEXT_DIM};
+            }}
+        """)
+        log_layout.addWidget(self.log_box)
+        main_layout.addWidget(self.log_section)
 
-        # Section 5: Results (hidden initially)
-        self.grp_results = QGroupBox("Results")
-        self.grp_results.setVisible(False)
-        vl5 = QVBoxLayout(self.grp_results)
+        # Restore saved options
+        self.chk_scan_all.setChecked(self.cfg.get("scan_all_files", False))
+        self.chk_dump_raw.setChecked(self.cfg.get("dump_raw", False))
+        self.chk_verbose.setChecked(self.cfg.get("verbose_logging", False))
 
-        self.lbl_results_stats = QLabel("")
-        vl5.addWidget(self.lbl_results_stats)
+    # ── Step state management ──
 
-        # Thumbnail scroll area
-        self.thumb_scroll = QScrollArea()
-        self.thumb_scroll.setWidgetResizable(True)
-        self.thumb_scroll.setMinimumHeight(120)
-        self.thumb_scroll.setMaximumHeight(240)
-        self.thumb_widget = QWidget()
-        self.thumb_layout = QHBoxLayout(self.thumb_widget)
-        self.thumb_layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
-        self.thumb_scroll.setWidget(self.thumb_widget)
-        vl5.addWidget(self.thumb_scroll)
+    def _update_steps(self, phase: str):
+        """Update step indicators based on current phase."""
+        if phase == "idle":
+            self.step1.set_state("active")
+            self.step2.set_state("active")
+            self.step3.set_state("upcoming")
+            self.step4.set_state("upcoming")
+        elif phase == "file_loaded":
+            self.step1.set_state("done")
+            self.step2.set_state("done")
+            self.step3.set_state("active")
+            self.step4.set_state("upcoming")
+        elif phase == "extracting":
+            self.step1.set_state("done")
+            self.step2.set_state("done")
+            self.step3.set_state("active")
+            self.step4.set_state("upcoming")
+        elif phase == "done":
+            self.step1.set_state("done")
+            self.step2.set_state("done")
+            self.step3.set_state("done")
+            self.step4.set_state("active")
 
-        layout.addWidget(self.grp_results)
-        layout.addStretch()
+    # ── File handling ──
 
-    # ── Drag and Drop ──
+    def _on_file_dropped(self, path: str):
+        if path == "":
+            # Click on drop zone → open browser
+            self._browse_input()
+            return
 
-    def dragEnterEvent(self, event: QDragEnterEvent):
-        if event.mimeData().hasUrls():
-            for url in event.mimeData().urls():
-                path = url.toLocalFile().lower()
-                if path.endswith((".3ds", ".cia", ".cxi", ".app")):
-                    event.acceptProposedAction()
-                    return
+        if not path.lower().endswith((".3ds", ".cia", ".cxi", ".app")):
+            self._show_error(
+                "This doesn't look like a 3DS ROM file",
+                "3DS Texture Forge works with:\n"
+                "  .3ds files (cartridge dumps)\n"
+                "  .cia files (installable titles)\n\n"
+                "Make sure your file is a decrypted 3DS game ROM."
+            )
+            return
 
-    def dropEvent(self, event: QDropEvent):
-        for url in event.mimeData().urls():
-            path = url.toLocalFile()
-            if path.lower().endswith((".3ds", ".cia", ".cxi", ".app")):
-                self.input_path.setText(path)
-                self._do_scan()
-                return
+        if not os.path.isfile(path):
+            self._show_error(
+                "File not found",
+                f"Could not find:\n{path}"
+            )
+            return
 
-    # ── Browse buttons ──
+        self._load_file(path)
 
     def _browse_input(self):
         start_dir = os.path.dirname(self.cfg.get("last_input_path", "")) or ""
@@ -358,93 +819,109 @@ class MainWindow(QMainWindow):
             "3DS ROMs (*.3ds *.cia *.cxi *.app);;All Files (*)",
         )
         if path:
-            self.input_path.setText(path)
-            self._do_scan()
+            self._load_file(path)
+
+    def _load_file(self, path: str):
+        self._loaded_path = path
+        self.cfg["last_input_path"] = path
+
+        # Quick scan to get game info
+        self._hide_error()
+        self.results_panel.setVisible(False)
+        self.drop_zone.set_loaded(path, "Scanning...")
+
+        # Synchronous scan — typically takes <2s, acceptable for UX
+        result = scan_rom(path)
+        self._on_quick_scan_done(result)
+
+    def _on_quick_scan_done(self, result: dict):
+        if result["success"]:
+            self._scan_result = result
+            self._game_name = get_game_name(
+                result.get("title_id", ""),
+                result.get("product_code", ""),
+            )
+
+            info = (f"{self._game_name}  |  "
+                    f"{result['product_code']}  |  "
+                    f"{result['file_count']} files")
+            self.drop_zone.set_loaded(self._loaded_path, info)
+
+            # Set output path
+            safe_name = re.sub(r'[<>:"/\\|?*]', '', self._game_name).strip() or "output"
+            output_dir = os.path.abspath(os.path.join("output", safe_name))
+            self._output_dir = output_dir
+            self.lbl_output_path.setText(output_dir)
+            self.output_row.setVisible(True)
+
+            self.btn_extract.setEnabled(True)
+            self._update_steps("file_loaded")
+            self._hide_error()
+
+        elif result.get("is_encrypted"):
+            self.drop_zone.clear()
+            self._show_error(
+                "This ROM is encrypted",
+                "3DS Texture Forge can only read decrypted ROM files.\n\n"
+                "To decrypt your ROM:\n"
+                "  1. Put the ROM on your 3DS SD card\n"
+                "  2. Open GodMode9 on your 3DS\n"
+                "  3. Navigate to the ROM file\n"
+                '  4. Select "NCSD image options"  "Decrypt file"\n'
+                "  5. Copy the decrypted file back to your PC\n\n"
+                'Need help? Search "GodMode9 decrypt 3DS ROM" on YouTube.'
+            )
+            self._update_steps("idle")
+        else:
+            self.drop_zone.clear()
+            self._show_error(
+                "Could not read this file",
+                f"3DS Texture Forge works with:\n"
+                f"  .3ds files (cartridge dumps)\n"
+                f"  .cia files (installable titles)\n\n"
+                f"Make sure your file is a decrypted 3DS game ROM.\n\n"
+                f"Details: {result.get('error_message', 'Unknown error')}"
+            )
+            self._update_steps("idle")
+
+    # ── Output ──
 
     def _browse_output(self):
-        start_dir = self.output_path.text() or ""
-        path = QFileDialog.getExistingDirectory(self, "Select Output Folder", start_dir)
+        path = QFileDialog.getExistingDirectory(
+            self, "Select Output Folder",
+            getattr(self, '_output_dir', ''),
+        )
         if path:
-            self.output_path.setText(path)
+            self._output_dir = path
+            self.lbl_output_path.setText(path)
 
-    # ── Actions ──
-
-    def _set_busy(self, busy: bool):
-        self.btn_scan.setEnabled(not busy)
-        self.btn_extract.setEnabled(not busy)
-
-    def _do_scan(self):
-        path = self.input_path.text().strip()
-        if not path or not os.path.isfile(path):
-            QMessageBox.warning(self, "No File",
-                "Please select a valid ROM file first.")
-            return
-
-        self._set_busy(True)
-        self.lbl_status.setText("Loading ROM...")
-        self.progress_bar.setRange(0, 0)  # indeterminate
-        self.lbl_rom_info.setText("Scanning...")
-        self.lbl_rom_info.setStyleSheet("color: #d4d4d4;")
-
-        self.worker = ScanWorker(path)
-        self.worker.log_message.connect(self._append_log)
-        self.worker.finished.connect(self._on_scan_finished)
-        self.worker.start()
-
-    def _on_scan_finished(self, result: dict):
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(100 if result["success"] else 0)
-        self._set_busy(False)
-        self.worker = None
-
-        if result["success"]:
-            self.scan_result = result
-            info = (f"{result['product_code']} | {result['title_id']} | "
-                    f"{result['file_count']} files in RomFS")
-            self.lbl_rom_info.setText(info)
-            self.lbl_rom_info.setStyleSheet("color: #90ee90;")
-            self.lbl_status.setText("Scan complete. Ready to extract.")
-
-            # Save and auto-fill output path
-            self.cfg["last_input_path"] = self.input_path.text()
-            if not self.output_path.text().strip():
-                default_out = os.path.join("output", result["title_id"])
-                self.output_path.setText(os.path.abspath(default_out))
-            save_config(self.cfg)
-        elif result["is_encrypted"]:
-            self.lbl_rom_info.setText("Encrypted ROM")
-            self.lbl_rom_info.setStyleSheet("color: #ff6b6b;")
-            self.lbl_status.setText("Cannot process encrypted ROM.")
-            QMessageBox.warning(self, "Encrypted ROM",
-                "This ROM is encrypted. Please decrypt it first using "
-                "GodMode9 or a similar tool.\n\n"
-                "3DS Texture Forge cannot extract textures from encrypted ROMs.")
-        else:
-            self.lbl_rom_info.setText("Failed to parse")
-            self.lbl_rom_info.setStyleSheet("color: #ff6b6b;")
-            self.lbl_status.setText("Scan failed.")
-            QMessageBox.warning(self, "Parse Error",
-                f"Could not parse this file.\n\n"
-                f"Supported formats: .3ds, .cia, .cxi, .app (decrypted only).\n\n"
-                f"Error: {result['error_message']}")
+    # ── Extract ──
 
     def _do_extract(self):
-        path = self.input_path.text().strip()
-        if not path or not os.path.isfile(path):
-            QMessageBox.warning(self, "No File",
-                "Please select a valid ROM file first.")
+        if not self._loaded_path or not os.path.isfile(self._loaded_path):
             return
 
-        out_dir = self.output_path.text().strip()
-        if not out_dir:
-            QMessageBox.warning(self, "No Output",
-                "Please specify an output directory.")
+        output_dir = getattr(self, '_output_dir', '')
+        if not output_dir:
             return
 
-        self._set_busy(True)
-        self.grp_results.setVisible(False)
-        self.lbl_status.setText("Loading ROM...")
-        self.progress_bar.setRange(0, 0)  # indeterminate initially
+        # Disable button, show progress
+        self.btn_extract.setEnabled(False)
+        self.btn_extract.setText("   EXTRACTING...   ")
+        self.results_panel.setVisible(False)
+        self._hide_error()
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, 0)  # indeterminate
+        self.lbl_progress_text.setVisible(True)
+        self.lbl_progress_text.setText("Loading ROM...")
+        self._update_steps("extracting")
+        self.log_box.clear()
+
+        if self.chk_verbose.isChecked():
+            logging.root.setLevel(logging.DEBUG)
+            self.log_section.set_expanded(True)
+        else:
+            logging.root.setLevel(logging.INFO)
 
         options = {
             "scan_all": self.chk_scan_all.isChecked(),
@@ -452,143 +929,224 @@ class MainWindow(QMainWindow):
             "verbose": self.chk_verbose.isChecked(),
         }
 
-        if self.chk_verbose.isChecked():
-            logging.root.setLevel(logging.DEBUG)
-        else:
-            logging.root.setLevel(logging.INFO)
-
-        self.worker = ExtractWorker(path, out_dir, options)
+        self.worker = ExtractWorker(self._loaded_path, output_dir, options)
         self.worker.log_message.connect(self._append_log)
         self.worker.progress.connect(self._on_extract_progress)
+        self.worker.phase_changed.connect(self._on_phase_changed)
         self.worker.finished.connect(self._on_extract_finished)
         self.worker.start()
+
+    def _on_phase_changed(self, phase_text: str):
+        self.lbl_progress_text.setText(phase_text)
 
     def _on_extract_progress(self, current: int, total: int, file_path: str):
         if total > 0:
             self.progress_bar.setRange(0, total)
             self.progress_bar.setValue(current)
-            fname = os.path.basename(file_path) if file_path else ""
-            self.lbl_status.setText(
-                f"Extracting textures ({current}/{total})... {fname}")
+            self.lbl_progress_text.setText(
+                f"Extracting textures ({current}/{total})..."
+            )
 
     def _on_extract_finished(self, result: dict):
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(100 if result["success"] else 0)
-        self._set_busy(False)
         self.worker = None
+        self.progress_bar.setVisible(False)
+        self.lbl_progress_text.setVisible(False)
 
-        if result["success"]:
-            self.extract_result = result
+        if result.get("success"):
             s = result.get("summary", {})
             decoded = s.get("textures_decoded_ok", 0)
             failed = s.get("textures_failed", 0)
-            title_id = s.get("title_id", "")
+            suspicious = s.get("suspicious_outputs", 0)
             elapsed = result.get("elapsed", 0)
+            game_name = result.get("game_name", self._game_name)
 
-            self.lbl_status.setText("Done.")
+            # Update button
+            self.btn_extract.setText("   EXTRACT TEXTURES   ")
+            self.btn_extract.setEnabled(True)
 
-            # Stats
-            fail_color = "red" if failed > 0 else "gray"
-            self.lbl_results_stats.setText(
-                f'<span style="color: #90ee90;">Textures extracted: {decoded}</span>'
-                f'&nbsp;&nbsp;|&nbsp;&nbsp;'
-                f'<span style="color: {fail_color};">Failed: {failed}</span>'
-                f'&nbsp;&nbsp;|&nbsp;&nbsp;'
-                f'Title ID: {title_id}'
-                f'&nbsp;&nbsp;|&nbsp;&nbsp;'
-                f'Time: {elapsed}s'
-            )
+            # Show results
+            if decoded > 0:
+                self.lbl_results_headline.setText(
+                    f'<span style="color:{COL_GREEN};">'
+                    f'Done! Extracted {decoded:,} textures from {game_name}</span>'
+                )
+            else:
+                self.lbl_results_headline.setText(
+                    f'<span style="color:{COL_ORANGE};">'
+                    f'No textures were found in {game_name}</span>'
+                )
 
-            # Enable post-extract buttons
-            self.btn_open_folder.setEnabled(True)
-            manifest_path = os.path.join(result["output_dir"], "manifest.json")
-            self.btn_manifest.setEnabled(os.path.isfile(manifest_path))
+            # Detail line
+            details = []
+            if failed > 0:
+                details.append(f'<span style="color:{COL_RED};">{failed} failed</span>')
+            if suspicious > 0:
+                details.append(f"{suspicious} may be blank or corrupted")
+            details.append(f"{elapsed}s")
+            if details:
+                self.lbl_results_detail.setText("  |  ".join(details))
+                self.lbl_results_detail.setVisible(True)
 
-            # Save paths
-            self.cfg["last_input_path"] = self.input_path.text()
-            self.cfg["last_output_path"] = self.output_path.text()
-            save_config(self.cfg)
+            # Store output dir for buttons
+            self._result_output_dir = result.get("output_dir", getattr(self, '_output_dir', ''))
+
+            # Check manifest
+            manifest_path = os.path.join(self._result_output_dir, "manifest.json")
+            self.btn_manifest.setVisible(os.path.isfile(manifest_path))
 
             # Load thumbnails
-            self._load_thumbnails(result["output_dir"])
+            self._load_thumbnails(self._result_output_dir, decoded)
 
-            self.grp_results.setVisible(True)
+            self.results_panel.setVisible(True)
+            self._update_steps("done")
 
+            # If zero textures, show helpful message
             if decoded == 0:
-                QMessageBox.information(self, "No Textures Found",
-                    "No textures were found.\n\n"
-                    "Try enabling 'Deep scan' to brute-force search all files.")
+                self._show_error(
+                    "No textures were found in this ROM",
+                    "This could mean:\n"
+                    "  The game uses a format we don't support yet\n"
+                    "  The ROM file might be corrupted or incomplete\n\n"
+                    'Try: Check the "Deep scan" option in Advanced Options\n'
+                    "below and extract again. If that doesn't help,\n"
+                    "this game may not be supported yet.",
+                    is_warning=True,
+                )
 
-        elif result["is_encrypted"]:
-            self.lbl_status.setText("Cannot process encrypted ROM.")
-            QMessageBox.warning(self, "Encrypted ROM",
-                "This ROM is encrypted. Please decrypt it first using "
-                "GodMode9 or a similar tool.")
+        elif result.get("is_encrypted"):
+            self.btn_extract.setText("   EXTRACT TEXTURES   ")
+            self.btn_extract.setEnabled(True)
+            self._update_steps("file_loaded")
+            self._show_error(
+                "This ROM is encrypted",
+                "3DS Texture Forge can only read decrypted ROM files.\n\n"
+                "To decrypt your ROM:\n"
+                "  1. Put the ROM on your 3DS SD card\n"
+                "  2. Open GodMode9 on your 3DS\n"
+                "  3. Navigate to the ROM file\n"
+                '  4. Select "NCSD image options"  "Decrypt file"\n'
+                "  5. Copy the decrypted file back to your PC\n\n"
+                'Need help? Search "GodMode9 decrypt 3DS ROM" on YouTube.'
+            )
         else:
-            self.lbl_status.setText("Extraction failed.")
-            QMessageBox.warning(self, "Extraction Error",
-                f"Extraction failed:\n\n{result['error_message']}")
+            self.btn_extract.setText("   EXTRACT TEXTURES   ")
+            self.btn_extract.setEnabled(True)
+            self._update_steps("file_loaded")
+            self._show_error(
+                "Extraction failed",
+                result.get("error_message", "An unknown error occurred."),
+            )
 
-    def _load_thumbnails(self, output_dir: str):
-        # Clear existing thumbnails
+        save_config(self.cfg)
+
+    # ── Results helpers ──
+
+    def _load_thumbnails(self, output_dir: str, total_decoded: int):
+        # Clear existing
         while self.thumb_layout.count():
             item = self.thumb_layout.takeAt(0)
             w = item.widget()
             if w:
                 w.deleteLater()
 
-        previews = get_output_previews(output_dir, max_count=12)
-        total_pngs = 0
-        textures_dir = os.path.join(output_dir, "textures")
-        if os.path.isdir(textures_dir):
-            for root, dirs, files in os.walk(textures_dir):
-                total_pngs += sum(1 for f in files if f.lower().endswith(".png"))
+        previews = get_output_previews(output_dir, max_count=18)
 
         for png_path in previews:
             pixmap = QPixmap(png_path)
             if pixmap.isNull():
                 continue
-            scaled = pixmap.scaled(96, 96,
-                                   Qt.AspectRatioMode.KeepAspectRatio,
-                                   Qt.TransformationMode.SmoothTransformation)
+            scaled = pixmap.scaled(
+                80, 80,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
             lbl = QLabel()
             lbl.setPixmap(scaled)
             lbl.setToolTip(os.path.basename(png_path))
             lbl.setCursor(Qt.CursorShape.PointingHandCursor)
-            # Store path for click handler
-            lbl.setProperty("png_path", png_path)
+            lbl.setStyleSheet("border: none; padding: 2px;")
             lbl.mousePressEvent = lambda event, p=png_path: self._open_image(p)
             self.thumb_layout.addWidget(lbl)
 
-        remaining = total_pngs - len(previews)
+        remaining = total_decoded - len(previews)
         if remaining > 0:
-            more_lbl = QLabel(f"and {remaining} more...")
-            more_lbl.setStyleSheet("color: gray; font-style: italic; padding: 8px;")
+            more_lbl = QLabel(f"... and {remaining:,} more")
+            more_lbl.setStyleSheet(
+                f"color: {COL_TEXT_DIM}; font-style: italic; "
+                f"padding: 8px; border: none;"
+            )
             self.thumb_layout.addWidget(more_lbl)
 
     def _open_image(self, path: str):
         QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
     def _open_output_folder(self):
-        out_dir = self.output_path.text().strip()
+        out_dir = getattr(self, '_result_output_dir', '')
         if out_dir and os.path.isdir(out_dir):
             QDesktopServices.openUrl(QUrl.fromLocalFile(out_dir))
 
     def _open_manifest(self):
-        out_dir = self.output_path.text().strip()
+        out_dir = getattr(self, '_result_output_dir', '')
         if not out_dir:
             return
         manifest_path = os.path.join(out_dir, "manifest.json")
         if os.path.isfile(manifest_path):
             QDesktopServices.openUrl(QUrl.fromLocalFile(manifest_path))
 
+    # ── Error display ──
+
+    def _show_error(self, title: str, body: str, is_warning: bool = False):
+        border_color = COL_ORANGE if is_warning else COL_RED
+        bg_color = "#3a2a1a" if is_warning else "#3a1a1a"
+        icon = "" if is_warning else ""
+        self.error_panel.setStyleSheet(f"""
+            QFrame {{
+                background: {bg_color};
+                border: 1px solid {border_color};
+                border-radius: 8px;
+            }}
+        """)
+        self.lbl_error.setText(
+            f'<span style="color:{border_color}; font-size:13px; font-weight:bold;">'
+            f'{icon} {title}</span><br><br>'
+            f'<span style="color:{COL_TEXT}; font-size:11px; white-space:pre-wrap;">'
+            f'{body}</span>'
+        )
+        self.error_panel.setVisible(True)
+
+    def _hide_error(self):
+        self.error_panel.setVisible(False)
+
+    # ── About ──
+
+    def _show_about(self):
+        dlg = AboutDialog(self)
+        dlg.exec()
+
+    # ── Drag and Drop on main window (fallback) ──
+
+    def dragEnterEvent(self, event: QDragEnterEvent):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event: QDropEvent):
+        for url in event.mimeData().urls():
+            path = url.toLocalFile()
+            self._on_file_dropped(path)
+            return
+
     # ── Window lifecycle ──
 
     def closeEvent(self, event):
+        # Stop worker if running
+        if self.worker and self.worker.isRunning():
+            self.worker.terminate()
+            self.worker.wait(2000)
+
         self.cfg["window_width"] = self.width()
         self.cfg["window_height"] = self.height()
-        self.cfg["last_input_path"] = self.input_path.text()
-        self.cfg["last_output_path"] = self.output_path.text()
+        if self._loaded_path:
+            self.cfg["last_input_path"] = self._loaded_path
         self.cfg["scan_all_files"] = self.chk_scan_all.isChecked()
         self.cfg["dump_raw"] = self.chk_dump_raw.isChecked()
         self.cfg["verbose_logging"] = self.chk_verbose.isChecked()

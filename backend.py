@@ -19,6 +19,51 @@ from parsers.romfs import RomFSParser
 
 logger = logging.getLogger(__name__)
 
+# ──────────────────────────────────────────────
+# Game name lookup
+# ──────────────────────────────────────────────
+
+KNOWN_GAMES = {
+    "0004000000060200": "Resident Evil: Revelations",
+    "0004000000035D00": "Resident Evil: Revelations",
+    "0004000000060100": "Resident Evil: Revelations",
+    "0004000000194200": "Corpse Party",
+    "0004000000055E00": "Pokemon Y",
+    "0004000000055D00": "Pokemon X",
+    "0004000000175E00": "Pokemon Omega Ruby",
+    "000400000011C400": "Pokemon Omega Ruby",
+    "000400000011C500": "Pokemon Alpha Sapphire",
+    "0004000000175F00": "Pokemon Alpha Sapphire",
+    "0004000000030800": "Mario Kart 7",
+    "0004000000033500": "Zelda: Ocarina of Time 3D",
+    "0004000000033400": "Zelda: Ocarina of Time 3D",
+    "000400000008F900": "Zelda: Majora's Mask 3D",
+    "000400000008F800": "Zelda: Majora's Mask 3D",
+    "0004000000086400": "Animal Crossing: New Leaf",
+    "0004000000086300": "Animal Crossing: New Leaf",
+    "0004000000030600": "Super Mario 3D Land",
+    "0004000000030500": "Super Mario 3D Land",
+}
+
+
+def get_game_name(title_id: str, product_code: str = "") -> str:
+    """Get a human-readable game name from title ID or product code."""
+    # Pad to 16 chars for lookup
+    tid_padded = title_id.upper().replace("0X", "").zfill(16)
+
+    name = KNOWN_GAMES.get(tid_padded, "")
+    if name:
+        return name
+
+    # Fall back to product code
+    if product_code:
+        # "CTR-P-ABRE" → "Game ABRE"
+        code = product_code.replace("CTR-P-", "").replace("CTR-N-", "")
+        return f"Game {code}" if code else product_code
+
+    # Last resort: shortened title ID
+    return f"Game {tid_padded[-8:]}"
+
 
 def scan_rom(filepath: str) -> Dict[str, Any]:
     """

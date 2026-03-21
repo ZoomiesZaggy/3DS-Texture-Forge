@@ -2,7 +2,10 @@ __pycache__/
 build/
 dist/
 out/
+release/
+dist_test_*/
 *.spec
 *.png
 debug_*.py
 dump_blocks.py
+bulk_test.py

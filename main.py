@@ -137,12 +137,17 @@ def should_process_file(file_path: str, scan_all: bool) -> bool:
     ext = ""
     if "." in file_path:
         ext = "." + file_path.rsplit(".", 1)[-1].lower()
-    if ext in {".tex", ".bch", ".bcres", ".bflim", ".ctpk", ".cgfx",
-               ".bin", ".raw", ".dat", ".img"}:
+    if ext in {".tex", ".bch", ".bcres", ".bflim", ".bclim", ".ctpk", ".ctxb", ".cmb", ".cgfx",
+               ".bcmdl", ".bctex", ".bcmcla", ".szs", ".zar", ".zsi",
+               ".bccam", ".bcsdr", ".bcptl", ".bhres", ".bhtex", ".cbres",
+               ".lz", ".cmp",
+               ".bin", ".raw", ".dat", ".img", ".arc", ".sarc", ".garc"}:
         return True
     path_lower = file_path.lower()
     for d in ["/tex/", "/texture/", "/textures/", "/gui/", "/effect/",
-              "/model/", "/chr/", "/bg/", "/ui/", "/font/"]:
+              "/model/", "/chr/", "/bg/", "/ui/", "/font/", "/a/",
+              "/kart/", "/course/", "/driver/", "/menu",
+              "/actor/", "/scene/", "/kankyo/", "/ending/", "/misc/"]:
         if d in path_lower:
             return True
     return False
@@ -307,6 +312,17 @@ def cmd_extract(args, progress_callback=None):
             except Exception as e:
                 rgba = None
                 fail_reason = str(e)
+
+            # Crop to display dimensions if BFLIM provides them
+            if rgba is not None:
+                crop_w = tex_info.get("crop_width", 0)
+                crop_h = tex_info.get("crop_height", 0)
+                if crop_w > 0 and crop_h > 0 and (crop_w < w or crop_h < h):
+                    rgba = rgba[:crop_h, :crop_w]
+                    tex_info["width"] = crop_w
+                    tex_info["height"] = crop_h
+                    w = crop_w
+                    h = crop_h
 
             if rgba is None:
                 fail_reason = fail_reason if "fail_reason" in dir() else "decoder returned None"
