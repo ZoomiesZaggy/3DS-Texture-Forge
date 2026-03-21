@@ -27,9 +27,40 @@ def sha1_rgba(rgba: np.ndarray) -> str:
     return hashlib.sha1(rgba.tobytes()).hexdigest()
 
 
-def save_texture_as_png(rgba_data: np.ndarray, output_path: str) -> bool:
+def make_alpha_visible(rgba_data: np.ndarray, pica_format: int = -1) -> np.ndarray:
+    """For alpha-only or white-luminance+alpha textures, make the alpha channel visible.
+
+    When RGB is constant (all white or all one color) but alpha varies, the texture
+    carries its real data in the alpha channel. This converts it so the alpha values
+    become visible grayscale in RGB, making textures like the Mario "M" logo or
+    shadow maps actually visible in image viewers.
+
+    Only activates when RGB is truly constant — normal RGBA textures are unaffected.
+    """
+    if rgba_data.ndim != 3 or rgba_data.shape[2] != 4:
+        return rgba_data
+
+    alpha = rgba_data[:, :, 3]
+    rgb = rgba_data[:, :, :3]
+
+    # Check if RGB is constant (std < 5) but alpha has meaningful variation
+    rgb_std = float(np.std(rgb.astype(np.float32)))
+    alpha_std = float(np.std(alpha.astype(np.float32)))
+
+    if rgb_std < 5.0 and alpha_std > 10.0:
+        # Alpha IS the texture — make it visible as grayscale with alpha preserved
+        gray = alpha
+        return np.stack([gray, gray, gray, alpha], axis=2)
+
+    return rgba_data
+
+
+def save_texture_as_png(rgba_data: np.ndarray, output_path: str,
+                        pica_format: int = -1) -> bool:
     try:
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        # Make alpha/luminance textures visible
+        rgba_data = make_alpha_visible(rgba_data, pica_format)
         if rgba_data.shape[2] == 4 and np.all(rgba_data[:, :, 3] == 255):
             img = Image.fromarray(rgba_data[:, :, :3], "RGB")
         else:

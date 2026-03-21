@@ -338,6 +338,26 @@ def cmd_extract(args, progress_callback=None):
                 tex_global_idx += 1
                 continue
 
+            # BCH heuristic pixel variance filter — reject decoded noise
+            # The BCH parser is heuristic-based and can find false positives
+            # in non-texture binary data. Two filter levels:
+            # - Solid-color textures (1 unique color) are always garbage
+            # - Two-color textures from the fallback scanner are also garbage
+            if parser_used == "bch":
+                flat = rgba.reshape(-1, 4)
+                sample = flat[:min(2000, len(flat))]
+                unique_colors = len(np.unique(sample, axis=0))
+                if unique_colors <= 1:
+                    logger.debug(f"BCH filter: skipping {w}x{h} (solid color)")
+                    tex_global_idx += 1
+                    continue
+                # For extreme aspect ratio textures, require more color variety
+                aspect = max(w, h) / max(min(w, h), 1)
+                if aspect > 8 and unique_colors <= 3:
+                    logger.debug(f"BCH filter: skipping {w}x{h} (thin strip, {unique_colors} colors)")
+                    tex_global_idx += 1
+                    continue
+
             # Quality check
             qm = compute_quality_metrics(rgba)
 
@@ -345,7 +365,7 @@ def cmd_extract(args, progress_callback=None):
             fname = generate_output_filename(tex_global_idx, tex_info, file_path)
             out_path = build_output_path(output_dir, file_path, fname)
 
-            if not save_texture_as_png(rgba, out_path):
+            if not save_texture_as_png(rgba, out_path, pica_format=fmt):
                 failures.append({
                     "id": tex_id,
                     "source_file_path": file_path,

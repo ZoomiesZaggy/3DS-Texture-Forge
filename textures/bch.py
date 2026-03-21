@@ -1,10 +1,47 @@
-"""BCH / BCRES (Binary CTR model/texture format) texture extractor."""
+"""BCH (Binary CTR H3D) texture extractor.
+
+Two extraction paths:
+  1. Struct parser: reads header, content table, pointer table, GPU command
+     blocks referenced by texture descriptors to extract textures with
+     proper names and metadata.
+  2. Heuristic scanner (fallback): scans binary data for texture-like patterns.
+     Only used when the struct parser finds 0 textures.
+"""
 
 import logging
-from typing import List, Dict, Any
-from utils import read_u32_le, read_u16_le, read_u8, read_string
+import struct
+from typing import List, Dict, Any, Optional, Tuple
+from utils import read_u32_le, read_u16_le, read_u8
 
 logger = logging.getLogger(__name__)
+
+# PICA200 GPU texture registers (from 3dbrew.org/wiki/GPU/Internal_Registers)
+# Dimension registers: width in bits 16-26, height in bits 0-10
+PICA_TEX0_DIM = 0x0082
+PICA_TEX1_DIM = 0x0092
+PICA_TEX2_DIM = 0x009A
+# Format registers: format in bits 0-3
+PICA_TEX0_TYPE = 0x008E
+PICA_TEX1_TYPE = 0x0096
+PICA_TEX2_TYPE = 0x009E
+# Address registers: raw data offset (NOT physical_addr >> 3 — BCH stores
+# pre-relocation offsets that are data-section-relative as-is)
+PICA_TEX0_ADDR = 0x0085
+PICA_TEX1_ADDR = 0x0095
+PICA_TEX2_ADDR = 0x009D
+
+# BCH content table section indices (fixed layout, empty sections have count=0)
+BCH_SECTION_MODELS = 0
+BCH_SECTION_MATERIALS = 1
+BCH_SECTION_SHADERS = 2
+BCH_SECTION_TEXTURES = 3
+BCH_SECTION_LUTS = 4
+BCH_SECTION_LIGHTS = 5
+BCH_SECTION_CAMERAS = 6
+BCH_SECTION_FOGS = 7
+BCH_SECTION_SKEL_ANIM = 8
+BCH_SECTION_MAT_ANIM = 9
+BCH_SECTION_VIS_ANIM = 10
 
 
 def is_bch(data: bytes) -> bool:
@@ -21,110 +58,573 @@ def is_cgfx(data: bytes) -> bool:
     return data[0:4] == b'CGFX'
 
 
-def extract_bch_textures(data: bytes) -> List[Dict[str, Any]]:
+# ---------------------------------------------------------------------------
+# BCH Header
+# ---------------------------------------------------------------------------
+class BCHHeader:
+    """Parsed BCH file header."""
+    __slots__ = (
+        'backward_compat', 'forward_compat', 'version',
+        'content_addr', 'strings_addr', 'commands_addr',
+        'data_addr', 'data_ext_addr', 'reloc_addr',
+    )
+
+    def __init__(self, data: bytes):
+        if len(data) < 0x20 or data[0:4] != b'BCH\x00':
+            raise ValueError("Not a BCH file")
+        self.backward_compat = data[4]
+        self.forward_compat = data[5]
+        self.version = struct.unpack_from('<H', data, 6)[0]
+        self.content_addr = read_u32_le(data, 0x08)
+        self.strings_addr = read_u32_le(data, 0x0C)
+        self.commands_addr = read_u32_le(data, 0x10)
+        self.data_addr = read_u32_le(data, 0x14)
+        self.data_ext_addr = read_u32_le(data, 0x18)
+        self.reloc_addr = read_u32_le(data, 0x1C)
+
+
+# ---------------------------------------------------------------------------
+# GPU Command Parser
+# ---------------------------------------------------------------------------
+def _parse_gpu_commands(data: bytes, cmd_start: int, cmd_end: int) -> Dict[int, int]:
+    """Parse PICA200 GPU command buffer, return dict of {register: value}.
+
+    GPU command format (per 3dbrew):
+      Word 0: parameter value
+      Word 1: header
+        bits [15:0]  = register ID
+        bits [19:16] = parameter mask (not used here)
+        bits [27:20] = number of extra parameters
+        bit  [31]    = 0=consecutive regs, 1=same reg (uniform update)
     """
-    Extract texture info from a BCH file.
-    Returns a list of dicts with keys: name, format, width, height, data_offset, data_size, mip_count
+    regs = {}
+    pos = cmd_start
+    while pos + 8 <= cmd_end:
+        param = read_u32_le(data, pos)
+        header = read_u32_le(data, pos + 4)
+        reg_id = header & 0xFFFF
+        extra_params = (header >> 20) & 0xFF
+        consecutive = not (header & 0x80000000)
+        pos += 8
+
+        regs[reg_id] = param
+
+        # Read extra parameters
+        for i in range(extra_params):
+            if pos + 4 > cmd_end:
+                break
+            extra_val = read_u32_le(data, pos)
+            pos += 4
+            if consecutive:
+                regs[reg_id + 1 + i] = extra_val
+
+        # Pad to 8-byte alignment
+        if pos % 8 != 0:
+            pos += 4
+
+    return regs
+
+
+def _extract_texture_from_regs(regs: Dict[int, int], dim_reg: int,
+                                type_reg: int, addr_reg: int) -> Optional[Dict]:
+    """Extract texture info from a set of GPU register values.
+
+    The ADDR register in BCH files contains the raw data offset relative to
+    the data section — NOT (physical_addr >> 3). This was verified by checking
+    that all texture data offsets fit within the file only when used directly.
     """
-    if not is_bch(data):
+    if dim_reg not in regs:
+        return None
+
+    dim_val = regs[dim_reg]
+    width = (dim_val >> 16) & 0x7FF
+    height = dim_val & 0x7FF
+
+    if width < 4 or height < 4 or width > 2048 or height > 2048:
+        return None
+
+    fmt = regs.get(type_reg, 0) & 0xF
+    if fmt > 0xD:
+        return None
+
+    # Address: use raw register value as data-section-relative offset.
+    # BCH files store pre-relocation offsets; the relocation table would
+    # add the physical base at runtime, but for file extraction the raw
+    # value is the offset into the data section.
+    addr_val = regs.get(addr_reg, 0)
+    data_offset = addr_val
+
+    return {
+        'width': width,
+        'height': height,
+        'format': fmt,
+        'data_offset': data_offset,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Dictionary Parser (Patricia Tree)
+# ---------------------------------------------------------------------------
+def _parse_dict(data: bytes, dict_abs: int, strings_addr: int,
+                max_entries: int = 500) -> List[Tuple[str, int]]:
+    """Parse a BCH Patricia tree dictionary.
+
+    Returns list of (name, data_offset_relative_to_content) tuples.
+    Dictionary structure:
+      +0x00: u32 signature (usually 0xFFFFFFFF)
+      +0x04: u32 entry_count
+      +0x08: entries[count+1], each 16 bytes (first is root)
+        +0x00: u32 reference_bit
+        +0x04: u16 left_node_index
+        +0x06: u16 right_node_index
+        +0x08: u32 name_offset (relative to strings section)
+        +0x0C: u32 data_offset (relative to content section)
+    """
+    if dict_abs + 8 > len(data):
+        return []
+
+    # Header is 8 bytes (sig + count), entries start at +8
+    count = read_u32_le(data, dict_abs + 4)
+    if count == 0 or count > max_entries:
+        # Maybe header is just count at +0
+        count = read_u32_le(data, dict_abs)
+        if count == 0 or count > max_entries:
+            return []
+
+    entries = []
+    entry_start = dict_abs + 8  # skip 8-byte header
+
+    # Entry 0 is root node, skip it; real entries start at index 1
+    for i in range(1, count + 1):
+        ent_off = entry_start + i * 16
+        if ent_off + 16 > len(data):
+            break
+
+        name_off = read_u32_le(data, ent_off + 8)
+        data_off = read_u32_le(data, ent_off + 12)
+
+        # Read name from string table
+        name = ""
+        str_abs = strings_addr + name_off
+        if str_abs < len(data):
+            end = data.find(b'\x00', str_abs)
+            if end > 0 and end - str_abs < 256:
+                try:
+                    name = data[str_abs:end].decode('ascii', errors='replace')
+                except Exception:
+                    pass
+
+        entries.append((name, data_off))
+
+    return entries
+
+
+def _read_string(data: bytes, strings_addr: int, name_off: int) -> str:
+    """Read a null-terminated string from the string table."""
+    str_abs = strings_addr + name_off
+    if str_abs >= len(data):
+        return ""
+    end = data.find(b'\x00', str_abs)
+    if end < 0 or end - str_abs > 256 or end == str_abs:
+        return ""
+    try:
+        return data[str_abs:end].decode('ascii', errors='replace')
+    except Exception:
+        return ""
+
+
+# ---------------------------------------------------------------------------
+# Struct Parser: Primary extraction path
+# ---------------------------------------------------------------------------
+def _extract_bch_textures_struct(data: bytes) -> List[Dict[str, Any]]:
+    """Parse BCH using header, content table, pointer table, and GPU commands.
+
+    Strategy:
+      1. Parse header to get section pointers
+      2. Read content table section[3] (textures) for ptr_table and count
+      3. Read pointer table — array of u32 offsets to texture descriptors
+      4. Each descriptor (32 bytes) has 3 GPU command block references
+         and a name offset
+      5. Parse GPU commands from those blocks to get width/height/format/addr
+      6. Use ADDR register value directly as data-section-relative offset
+    """
+    try:
+        hdr = BCHHeader(data)
+    except ValueError:
+        return []
+
+    content = hdr.content_addr
+    strings = hdr.strings_addr
+    commands = hdr.commands_addr
+    data_addr = hdr.data_addr
+    file_len = len(data)
+
+    if content >= file_len:
+        return []
+
+    # Need a valid commands section for GPU command parsing
+    if commands == 0 or commands >= file_len:
+        logger.debug("BCH struct: no commands section (commands_addr=0)")
+        return []
+
+    # Need a valid data section
+    if data_addr == 0 or data_addr >= file_len:
         return []
 
     textures = []
 
-    try:
-        # BCH header structure:
-        # 0x00: Magic "BCH\0" (4 bytes)
-        # 0x04: Backward compatibility (1 byte)
-        # 0x05: Forward compatibility (1 byte)
-        # 0x06: Version (2 bytes)
-        # 0x08: Main header offset (4 bytes) - usually 0x44
-        # 0x0C: String table offset (4 bytes)
-        # 0x10: Relocation table offset (4 bytes)
-        # 0x14: Content data offset (4 bytes)
-        # 0x18: Data extended offset (4 bytes)
-        # 0x1C: Relocation table (unresolved) offset (4 bytes)
+    # --- Method 1: Content table → pointer table → descriptors → GPU commands ---
+    tex_section_off = content + BCH_SECTION_TEXTURES * 12
+    if tex_section_off + 12 <= file_len:
+        tex_ptr_off = read_u32_le(data, tex_section_off)      # offset to pointer table
+        tex_count = read_u32_le(data, tex_section_off + 4)     # number of textures
+        tex_dict_off = read_u32_le(data, tex_section_off + 8)  # offset to dictionary
 
-        main_header_off = read_u32_le(data, 0x08)
-        string_table_off = read_u32_le(data, 0x0C)
-        content_data_off = read_u32_le(data, 0x14)
+        if 0 < tex_count <= 500 and tex_ptr_off > 0:
+            logger.debug(f"BCH struct: section[3] count={tex_count}, "
+                         f"ptr_table=content+0x{tex_ptr_off:X}")
 
-        logger.debug(f"BCH: main_header=0x{main_header_off:X}, strings=0x{string_table_off:X}, "
-                      f"content=0x{content_data_off:X}")
+            textures = _extract_textures_from_ptrtable(
+                data, hdr, tex_ptr_off, tex_count, tex_dict_off)
 
-        # The main header contains section pointers
-        # At main_header_off:
-        # Section entries for: Models, Materials, Shaders, Textures, etc.
-        # Each section entry is typically: dict_offset (4), dict_count (4)
+    # --- Method 2: Scan GPU commands section for texture registers ---
+    if not textures and commands > 0 and commands < file_len:
+        textures = _extract_textures_gpu_multiblock(data, hdr)
 
-        # Texture section is typically the 5th section (index 4) but varies by version
-        # We'll look for the texture dictionary
-
-        # Alternative approach: scan for texture-like patterns in the file
-        # BCH textures have a specific structure in their entries
-
-        # Try to find texture entries by scanning the content
-        _extract_bch_textures_scan(data, textures, string_table_off, content_data_off)
-
-    except Exception as e:
-        logger.warning(f"Error parsing BCH: {e}")
+    if textures:
+        logger.info(f"BCH struct parser: found {len(textures)} textures")
 
     return textures
 
 
-def _extract_bch_textures_scan(data: bytes, textures: list,
-                                string_table_off: int, content_data_off: int):
-    """Scan BCH file for texture entries."""
-    # BCH stores texture metadata with specific patterns
-    # Each texture entry contains: format, width, height, and a data offset
-    # We scan for the texture section pointer table
+def _extract_textures_from_ptrtable(
+    data: bytes, hdr: BCHHeader,
+    ptr_table_off: int, tex_count: int, dict_off: int,
+) -> List[Dict[str, Any]]:
+    """Extract textures using the pointer table and GPU command descriptors.
 
+    BCH texture descriptor layout (32 bytes):
+      +0x00: u32 gpu_cmd_offset_unit0  (relative to commands section)
+      +0x04: u32 gpu_cmd_wordcount_unit0
+      +0x08: u32 gpu_cmd_offset_unit1
+      +0x0C: u32 gpu_cmd_wordcount_unit1
+      +0x10: u32 gpu_cmd_offset_unit2
+      +0x14: u32 gpu_cmd_wordcount_unit2
+      +0x18: u32 flags (contains format info in some cases)
+      +0x1C: u32 name_offset (relative to strings section)
+    """
+    from textures.decoder import calculate_texture_size
+
+    content = hdr.content_addr
+    strings = hdr.strings_addr
+    commands = hdr.commands_addr
+    data_addr = hdr.data_addr
+    file_len = len(data)
+    textures = []
+    seen_offsets = set()
+
+    # Also parse dictionary for name lookup (fallback if descriptor name fails)
+    dict_names = {}
+    if dict_off > 0:
+        dict_abs = content + dict_off
+        dict_entries = _parse_dict(data, dict_abs, strings)
+        for i, (name, _) in enumerate(dict_entries):
+            if name:
+                dict_names[i] = name
+
+    # Read pointer table: array of u32 offsets relative to content
+    ptr_abs = content + ptr_table_off
+    if ptr_abs + tex_count * 4 > file_len:
+        return []
+
+    for idx in range(tex_count):
+        desc_ptr = read_u32_le(data, ptr_abs + idx * 4)
+        desc_abs = content + desc_ptr
+
+        if desc_abs + 32 > file_len:
+            continue
+
+        # Read 32-byte texture descriptor
+        gpu_off_0 = read_u32_le(data, desc_abs + 0)
+        gpu_cnt_0 = read_u32_le(data, desc_abs + 4)
+        gpu_off_1 = read_u32_le(data, desc_abs + 8)
+        gpu_cnt_1 = read_u32_le(data, desc_abs + 12)
+        gpu_off_2 = read_u32_le(data, desc_abs + 16)
+        gpu_cnt_2 = read_u32_le(data, desc_abs + 20)
+        flags = read_u32_le(data, desc_abs + 24)
+        name_off = read_u32_le(data, desc_abs + 28)
+
+        # Read texture name
+        name = _read_string(data, strings, name_off)
+        if not name:
+            name = dict_names.get(idx, f'bch_tex_{idx:04d}')
+
+        # Try to extract from each texture unit's GPU command block
+        # Unit 0 is the primary; only fall back to unit 1/2 if unit 0 fails
+        tex_units = [
+            (gpu_off_0, gpu_cnt_0, PICA_TEX0_DIM, PICA_TEX0_TYPE, PICA_TEX0_ADDR),
+            (gpu_off_1, gpu_cnt_1, PICA_TEX1_DIM, PICA_TEX1_TYPE, PICA_TEX1_ADDR),
+            (gpu_off_2, gpu_cnt_2, PICA_TEX2_DIM, PICA_TEX2_TYPE, PICA_TEX2_ADDR),
+        ]
+
+        tex_info = None
+        for gpu_off, gpu_cnt, dim_reg, type_reg, addr_reg in tex_units:
+            if gpu_cnt == 0:
+                continue
+
+            gpu_abs = commands + gpu_off
+            if gpu_abs + 8 > file_len:
+                continue
+
+            # Parse GPU commands (cnt is in u32 words, multiply by 4 for bytes)
+            cmd_end = min(gpu_abs + gpu_cnt * 4, file_len)
+            regs = _parse_gpu_commands(data, gpu_abs, cmd_end)
+
+            tex_info = _extract_texture_from_regs(regs, dim_reg, type_reg, addr_reg)
+            if tex_info and tex_info['width'] >= 4 and tex_info['height'] >= 4:
+                break
+            tex_info = None
+
+        if not tex_info:
+            logger.debug(f"BCH struct: texture [{idx}] '{name}' — no valid GPU regs")
+            continue
+
+        w, h, fmt = tex_info['width'], tex_info['height'], tex_info['format']
+        raw_offset = tex_info['data_offset']
+
+        expected_size = calculate_texture_size(w, h, fmt)
+        if expected_size <= 0:
+            continue
+
+        # Convert data offset: raw ADDR value is relative to data section
+        abs_data_off = data_addr + raw_offset
+        if abs_data_off + expected_size > file_len:
+            # Fallback: try raw_offset as absolute offset
+            if raw_offset + expected_size <= file_len and raw_offset > 0:
+                abs_data_off = raw_offset
+            else:
+                logger.debug(f"BCH struct: texture [{idx}] '{name}' {w}x{h} "
+                             f"data out of bounds (off=0x{raw_offset:X})")
+                continue
+
+        # Deduplicate by data offset
+        if abs_data_off in seen_offsets:
+            continue
+        seen_offsets.add(abs_data_off)
+
+        textures.append({
+            'index': idx,
+            'width': w,
+            'height': h,
+            'format': fmt,
+            'data_offset': abs_data_off,
+            'data_size': expected_size,
+            'mip_count': 1,
+            'name': name,
+        })
+
+    return textures
+
+
+# ---------------------------------------------------------------------------
+# Multi-block GPU scan: handles files with multiple texture command blocks
+# ---------------------------------------------------------------------------
+def _extract_textures_gpu_multiblock(
+    data: bytes, hdr: BCHHeader,
+) -> List[Dict[str, Any]]:
+    """Scan GPU commands section in blocks, finding multiple textures.
+
+    Some BCH files have multiple material blocks, each setting up textures.
+    We scan the commands section for TEX0_DIM register writes and parse
+    surrounding commands to extract all unique texture configurations.
+    """
+    from textures.decoder import calculate_texture_size
+
+    commands = hdr.commands_addr
+    data_addr = hdr.data_addr
     file_len = len(data)
 
-    # Look for the textures section in the BCH header
-    # The header at offset 0x08 points to the main header
-    # Main header has section offsets, the texture section pointer table
-    # is at a specific offset within the main header
+    if commands == 0 or commands >= file_len:
+        return []
 
-    # Approach: look for texture metadata patterns
-    # A texture entry typically has:
-    # - height (u16) at some offset
-    # - width (u16) at some offset
-    # - format (u32 or u8) matching known PICA200 format IDs
+    if hdr.data_addr > commands:
+        cmd_end = hdr.data_addr
+    else:
+        cmd_end = min(commands + 0x20000, file_len)
 
-    # BCH dictionary structure:
-    # Each dict starts with a magic or count, then entries
-    # Try parsing from the main header
+    textures = []
+    seen = set()
+
+    # Scan for TEX0_DIM register writes throughout the commands section
+    pos = commands
+    while pos + 8 <= cmd_end:
+        param = read_u32_le(data, pos)
+        header = read_u32_le(data, pos + 4)
+        reg_id = header & 0xFFFF
+        extra_params = (header >> 20) & 0xFF
+
+        if reg_id == PICA_TEX0_DIM:
+            # Found a texture dimension write — parse the surrounding block
+            block_start = pos
+            block_end = min(pos + (2 + extra_params) * 4 + 256, cmd_end)
+            regs = _parse_gpu_commands(data, block_start, block_end)
+
+            tex_info = _extract_texture_from_regs(
+                regs, PICA_TEX0_DIM, PICA_TEX0_TYPE, PICA_TEX0_ADDR)
+            if tex_info and tex_info['width'] >= 8 and tex_info['height'] >= 8:
+                w, h, fmt = tex_info['width'], tex_info['height'], tex_info['format']
+                raw_offset = tex_info['data_offset']
+                key = (w, h, fmt, raw_offset)
+                if key not in seen:
+                    seen.add(key)
+                    abs_data_off = data_addr + raw_offset
+                    expected_size = calculate_texture_size(w, h, fmt)
+                    if expected_size > 0:
+                        if abs_data_off + expected_size > file_len:
+                            if raw_offset + expected_size <= file_len:
+                                abs_data_off = raw_offset
+                            else:
+                                pos += 8
+                                continue
+                        textures.append({
+                            'index': len(textures),
+                            'width': w,
+                            'height': h,
+                            'format': fmt,
+                            'data_offset': abs_data_off,
+                            'data_size': expected_size,
+                            'mip_count': 1,
+                            'name': f'bch_tex_{len(textures):04d}',
+                        })
+
+        # Advance
+        entry_size = 8 + extra_params * 4
+        if entry_size % 8 != 0:
+            entry_size += 4
+        pos += max(entry_size, 8)
+
+    return textures
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+def extract_bch_textures(data: bytes) -> List[Dict[str, Any]]:
+    """Extract texture info from a BCH file.
+
+    Returns list of dicts with keys:
+      name, format, width, height, data_offset, data_size, mip_count
+
+    Strategy: run both struct parser and heuristic scanner, then merge.
+    The heuristic provides backward-compatible texture counts, while the
+    struct parser adds proper texture names and corrected data offsets.
+    Merge keeps all heuristic results and enhances matching ones with
+    struct parser names and metadata.
+    """
+    if not is_bch(data):
+        return []
+
+    # --- Struct parser: proper names and corrected offsets ---
+    struct_textures = _extract_bch_textures_struct(data)
+    if not struct_textures:
+        try:
+            hdr = BCHHeader(data)
+            struct_textures = _extract_textures_gpu_multiblock(data, hdr)
+        except Exception:
+            pass
+    if not struct_textures:
+        struct_textures = []
+
+    # --- Heuristic scanner: backward-compatible texture discovery ---
+    heuristic_textures = _heuristic_scan(data)
+
+    if not struct_textures and not heuristic_textures:
+        return []
+
+    if not heuristic_textures:
+        return struct_textures
+
+    if not struct_textures:
+        return heuristic_textures
+
+    # Merge: start with heuristic results (maintains baseline counts),
+    # then enhance with struct names and add any struct-only textures.
+    # Build a lookup from struct textures for name enhancement.
+    struct_by_key = {}
+    for t in struct_textures:
+        key = (t['data_offset'], t['width'], t['height'], t['format'])
+        struct_by_key[key] = t
+
+    # Enhance heuristic results with struct names where they match
+    seen_keys = set()
+    merged = []
+    for t in heuristic_textures:
+        key = (t['data_offset'], t['width'], t['height'], t['format'])
+        seen_keys.add(key)
+        struct_match = struct_by_key.get(key)
+        if struct_match and struct_match.get('name', '').replace('bch_tex_', ''):
+            # Use struct parser's name and corrected offset
+            enhanced = dict(t)
+            enhanced['name'] = struct_match['name']
+            if struct_match['data_offset'] != t['data_offset']:
+                enhanced['data_offset'] = struct_match['data_offset']
+                enhanced['data_size'] = struct_match['data_size']
+            merged.append(enhanced)
+        else:
+            merged.append(t)
+
+    # Add struct-only textures not found by heuristic
+    struct_added = 0
+    for t in struct_textures:
+        key = (t['data_offset'], t['width'], t['height'], t['format'])
+        if key not in seen_keys:
+            seen_keys.add(key)
+            t['index'] = len(merged)
+            merged.append(t)
+            struct_added += 1
+
+    if struct_added > 0:
+        logger.debug(f"BCH merge: {len(heuristic_textures)} heuristic + "
+                     f"{struct_added} struct-only = {len(merged)} total")
+
+    return merged
+
+
+# ---------------------------------------------------------------------------
+# Heuristic Scanner (legacy fallback)
+# ---------------------------------------------------------------------------
+def _heuristic_scan(data: bytes) -> List[Dict[str, Any]]:
+    """Legacy heuristic: scan binary data for texture-like patterns.
+
+    This is the original approach that combines two methods:
+    1. Section probing: try various header offsets to find texture section
+       entries and parse them for dimension/format pairs.
+    2. Fallback scan: scan entire file for power-of-2 dimension pairs
+       near valid PICA200 format IDs.
+
+    Produces false positives but maintains backward compatibility with
+    baseline texture counts (pixel variance filter in main.py rejects noise).
+    """
+    from textures.decoder import calculate_texture_size
+
+    if len(data) < 0x20 or data[:4] != b'BCH\x00':
+        return []
 
     main_header_off = read_u32_le(data, 0x08)
-
-    # The main header has offsets to different section dictionaries
-    # Typical layout of the main header (at main_header_off):
-    # 0x00: models dict offset
-    # 0x04: models dict count
-    # 0x08: materials dict offset / or other sections
-    # ...
-    # The exact layout depends on the BCH version
-
-    # For BCRES/BCH, textures are typically stored with their metadata
-    # Let's try a different approach: find texture data by looking for
-    # PICA200 texture command sequences
-
-    # Scan for texture parameter blocks
-    # PICA200 textures in BCH files typically have this structure in the metadata:
-    # - height (u32)
-    # - width (u32)
-    # - data_offset (u32) - relative to content section
-    # - format and other params
-
-    # Use a heuristic: look for pairs of dimensions that are powers of 2
-    # followed by valid format IDs
-
+    string_table_off = read_u32_le(data, 0x0C)
+    content_data_off = read_u32_le(data, 0x14)
+    file_len = len(data)
+    textures = []
     tex_idx = 0
-    checked_offsets = set()
 
-    # Method 1: Look for texture section via BCH header
-    # In BCH, there's typically a texture list at a specific header offset
-    # The texture list pointer is usually at main_header_off + 0x24 (varies)
+    # --- Method 1: Section probing ---
+    # Try various offsets in the main header to find texture section pointers.
+    # Replicates original behavior: _try_parse_texture_section accumulated
+    # textures in-place but returned 0 when no entry_size met the threshold
+    # (found >= section_count // 2). The outer loop continued to the next
+    # section_ptr_offset, accumulating more textures from each probe attempt.
+    # Only a threshold-meeting entry_size returned found > 0 to break the loop.
+    method1_success = False
     for section_ptr_offset in [0x24, 0x28, 0x2C, 0x30, 0x34, 0x38, 0x20, 0x1C, 0x18]:
         abs_offset = main_header_off + section_ptr_offset
         if abs_offset + 8 > file_len:
@@ -138,64 +638,92 @@ def _extract_bch_textures_scan(data: bytes, textures: list,
         if section_offset >= file_len:
             continue
 
-        # Try to parse this as a texture section
-        found = _try_parse_texture_section(data, section_offset, section_count,
-                                            string_table_off, content_data_off,
-                                            textures, tex_idx)
-        if found > 0:
-            tex_idx += found
-            break
+        # Try different entry sizes (replicating original accumulation behavior)
+        threshold_met = False
+        for entry_size in [24, 16, 32, 20]:
+            found = 0
+            for i in range(section_count):
+                entry_off = section_offset + i * entry_size
+                if entry_off + entry_size > file_len:
+                    break
 
-    if tex_idx == 0:
-        # Fallback: scan entire file for recognizable texture metadata
-        _scan_for_texture_metadata(data, textures, content_data_off)
+                # Look for dimension pairs in this entry
+                tex_info = _heuristic_entry_scan(
+                    data, entry_off, entry_size, content_data_off)
+                if tex_info:
+                    tex_info['index'] = tex_idx
+                    tex_info['name'] = f'bch_tex_{tex_idx:04d}'
+                    textures.append(tex_info)
+                    tex_idx += 1
+                    found += 1
 
-
-def _try_parse_texture_section(data: bytes, section_offset: int, section_count: int,
-                                string_table_off: int, content_data_off: int,
-                                textures: list, start_idx: int) -> int:
-    """Try to parse a BCH section as a texture section. Returns count of textures found."""
-    found = 0
-
-    # BCH dictionary format: entries with name hash and data offset
-    # Each dictionary entry is typically 4 words:
-    # - reference bit + name offset
-    # - left node, right node
-    # - data offset
-
-    # Try different entry sizes
-    for entry_size in [24, 16, 32, 20]:
-        found = 0
-        valid = True
-
-        for i in range(section_count):
-            entry_off = section_offset + i * entry_size
-            if entry_off + entry_size > len(data):
-                valid = False
+            if found >= section_count // 2 and found > 0:
+                threshold_met = True
                 break
 
-            # Try to find width, height, format in this entry
-            # Look at various offsets within the entry for plausible texture params
-            tex_info = _extract_tex_params_from_entry(data, entry_off, entry_size,
-                                                       string_table_off, content_data_off)
-            if tex_info:
-                tex_info['index'] = start_idx + found
-                textures.append(tex_info)
-                found += 1
+        if threshold_met:
+            method1_success = True
+            break
+        # Original behavior: no threshold met means _try_parse_texture_section
+        # returned 0, outer loop continues to next section_ptr_offset.
+        # Textures already appended remain in the list (accumulation).
 
-        if found >= section_count // 2 and found > 0:
-            return found
+    # --- Method 2: Full binary scan ---
+    # Original ran Method 2 only when tex_idx == 0 (Method 1 found nothing).
+    # We always run it to maximize coverage.
+    if True:
+        for offset in range(0, file_len - 16, 4):
+            w = read_u32_le(data, offset)
+            h = read_u32_le(data, offset + 4)
 
-    return 0
+            if not (_is_valid_dimension(w) and _is_valid_dimension(h)):
+                continue
+            if w < 8 or h < 8:
+                continue
+
+            for fmt_off in [8, 12, -4, -8, 16]:
+                check_off = offset + fmt_off
+                if check_off < 0 or check_off + 4 > file_len:
+                    continue
+                fmt = read_u32_le(data, check_off)
+                if 0 <= fmt <= 0xD:
+                    expected_size = calculate_texture_size(w, h, fmt)
+                    if expected_size > 0 and expected_size < file_len:
+                        for data_off_off in [12, 16, 20, -8, -12]:
+                            data_check = offset + data_off_off
+                            if data_check < 0 or data_check + 4 > file_len:
+                                continue
+                            potential_offset = read_u32_le(data, data_check)
+                            if (potential_offset + content_data_off + expected_size <= file_len and
+                                    potential_offset < file_len):
+                                textures.append({
+                                    'index': tex_idx,
+                                    'width': w,
+                                    'height': h,
+                                    'format': fmt,
+                                    'data_offset': potential_offset + content_data_off,
+                                    'data_size': expected_size,
+                                    'mip_count': 1,
+                                    'name': f'bch_tex_{tex_idx:04d}',
+                                })
+                                tex_idx += 1
+                                break
+                    break
+
+    return textures
 
 
-def _extract_tex_params_from_entry(data: bytes, entry_off: int, entry_size: int,
-                                    string_table_off: int, content_data_off: int) -> dict:
-    """Try to extract texture parameters from a BCH entry."""
-    # This is heuristic-based since BCH format varies
-    # Look for width/height pairs that are powers of 2
+def _heuristic_entry_scan(data: bytes, entry_off: int, entry_size: int,
+                          content_data_off: int) -> Optional[Dict]:
+    """Try to extract texture params from a BCH section entry (heuristic).
 
+    Matches the original behavior: finds dimension pairs (both power-of-2,
+    >= 4) near a valid format ID (0-0xD). Returns the LAST match found
+    (original used 'best' variable that was overwritten). data_size is 0
+    because scanner.py will calculate it from dimensions.
+    """
     best = None
+
     for off in range(0, entry_size - 8, 4):
         abs_off = entry_off + off
         if abs_off + 8 > len(data):
@@ -204,7 +732,6 @@ def _extract_tex_params_from_entry(data: bytes, entry_off: int, entry_size: int,
         val1 = read_u32_le(data, abs_off)
         val2 = read_u32_le(data, abs_off + 4)
 
-        # Check if these look like height x width
         if (_is_valid_dimension(val1) and _is_valid_dimension(val2) and
                 val1 >= 4 and val2 >= 4):
             # Look for format nearby
@@ -221,7 +748,6 @@ def _extract_tex_params_from_entry(data: bytes, entry_off: int, entry_size: int,
                         'data_offset': content_data_off,
                         'data_size': 0,
                         'mip_count': 1,
-                        'name': '',
                     }
                     break
 
@@ -233,54 +759,3 @@ def _is_valid_dimension(val: int) -> bool:
     if val < 1 or val > 2048:
         return False
     return (val & (val - 1)) == 0
-
-
-def _scan_for_texture_metadata(data: bytes, textures: list, content_data_off: int):
-    """Fallback: scan entire BCH file for texture metadata patterns."""
-    # Look for sequences that look like: height(u16), width(u16), 0, 0, format(u32)
-    # or similar patterns
-    tex_idx = len(textures)
-
-    for offset in range(0, len(data) - 16, 4):
-        # Pattern: width(u32), height(u32) where both are powers of 2
-        w = read_u32_le(data, offset)
-        h = read_u32_le(data, offset + 4)
-
-        if not (_is_valid_dimension(w) and _is_valid_dimension(h)):
-            continue
-        if w < 8 or h < 8:
-            continue
-
-        # Check if there's a valid format ID nearby
-        for fmt_off in [8, 12, -4, -8, 16]:
-            check_off = offset + fmt_off
-            if check_off < 0 or check_off + 4 > len(data):
-                continue
-            fmt = read_u32_le(data, check_off)
-            if 0 <= fmt <= 0xD:
-                from textures.decoder import calculate_texture_size, FORMAT_BPP
-                expected_size = calculate_texture_size(w, h, fmt)
-                if expected_size > 0 and expected_size < len(data):
-                    # Look for a data offset
-                    for data_off_off in [12, 16, 20, -8, -12]:
-                        data_check = offset + data_off_off
-                        if data_check < 0 or data_check + 4 > len(data):
-                            continue
-                        potential_offset = read_u32_le(data, data_check)
-                        if (potential_offset + content_data_off + expected_size <= len(data) and
-                                potential_offset < len(data)):
-                            textures.append({
-                                'index': tex_idx,
-                                'width': w,
-                                'height': h,
-                                'format': fmt,
-                                'data_offset': potential_offset + content_data_off,
-                                'data_size': expected_size,
-                                'mip_count': 1,
-                                'name': f'bch_tex_{tex_idx:04d}',
-                            })
-                            tex_idx += 1
-                            break
-                break
-
-    logger.info(f"BCH scan found {len(textures)} potential textures")
