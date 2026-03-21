@@ -13,7 +13,7 @@ from typing import Optional
 from PySide6.QtCore import Qt, QThread, Signal, QUrl, QMimeData, QTimer
 from PySide6.QtGui import (
     QColor, QDesktopServices, QDragEnterEvent, QDropEvent,
-    QFont, QPalette, QPixmap, QPainter, QPen, QAction, QCursor,
+    QFont, QIcon, QPalette, QPixmap, QPainter, QPen, QAction, QCursor,
 )
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QFileDialog, QFrame, QGridLayout, QGroupBox,
@@ -438,6 +438,7 @@ class MainWindow(QMainWindow):
         self._game_name = ""
 
         self.setWindowTitle("3DS Texture Forge")
+        self._set_window_icon()
         self.setMinimumSize(800, 600)
         self.resize(self.cfg.get("window_width", 1000),
                     self.cfg.get("window_height", 720))
@@ -446,6 +447,16 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._setup_logging()
         self._update_steps("idle")
+
+    def _set_window_icon(self):
+        """Set the window icon, checking PyInstaller bundle path first."""
+        if getattr(sys, 'frozen', False):
+            base_path = sys._MEIPASS
+        else:
+            base_path = os.path.dirname(os.path.abspath(__file__))
+        icon_path = os.path.join(base_path, 'icon.ico')
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
 
     # ── Logging ──
 
