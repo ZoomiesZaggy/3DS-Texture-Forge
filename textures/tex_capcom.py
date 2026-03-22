@@ -88,6 +88,58 @@ GAME_PROFILES: Dict[str, Dict[str, Any]] = {
         "format_byte_offset": 0x0D,
         "notes": "Same engine as EUR, assumed same mapping.",
     },
+    # Monster Hunter 4 Ultimate (MT Framework Mobile, same header variant as RE:R)
+    # Format byte at 0x0D; 0x0C = ETC1 (4bpp) — confirmed: 32768-byte mip0 -> 256x256 ETC1.
+    # Default CAPCOM_FORMAT_MAP maps 0x0C -> ETC1A4 (8bpp) which is wrong for MH4U.
+    # Title ID confirmed from ROM: 0004000000126300 (USA ROM "Monster Hunter 4 Ultimate")
+    "0004000000126300": {
+        "name": "MH4 Ultimate (USA)",
+        "format_map": {
+            0x0C: 0x0C,   # ETC1  (4bpp) — confirmed from payload analysis
+            0x0D: 0x0D,   # ETC1A4 (8bpp)
+            0x0B: 0x0C,   # ETC1 (reuse 0x0B same as default)
+            0x11: 0x0C,   # ETC1 (matches RE:R mapping)
+        },
+        "header_offsets": [0x14, 0x10, 0x18, 0x20],
+        "format_byte_offset": 0x0D,
+        "notes": "Inferred from failing TEX analysis: format byte 0x0C = ETC1 (4bpp).",
+    },
+    "000400000016D200": {
+        "name": "MH4 Ultimate (EUR)",
+        "format_map": {
+            0x0C: 0x0C,
+            0x0D: 0x0D,
+            0x0B: 0x0C,
+            0x11: 0x0C,
+        },
+        "header_offsets": [0x14, 0x10, 0x18, 0x20],
+        "format_byte_offset": 0x0D,
+        "notes": "Same engine as USA version, assumed same mapping.",
+    },
+    "000400000016E400": {
+        "name": "MH4G (JPN)",
+        "format_map": {
+            0x0C: 0x0C,
+            0x0D: 0x0D,
+            0x0B: 0x0C,
+            0x11: 0x0C,
+        },
+        "header_offsets": [0x14, 0x10, 0x18, 0x20],
+        "format_byte_offset": 0x0D,
+        "notes": "Same engine as USA version, assumed same mapping.",
+    },
+    # RE: The Mercenaries 3D (same MT Framework Mobile engine)
+    "0004000000060300": {
+        "name": "RE Mercenaries (USA)",
+        "format_map": {
+            0x0B: 0x01,
+            0x0C: 0x0D,
+            0x11: 0x0C,
+        },
+        "header_offsets": [0x14, 0x10, 0x18, 0x20],
+        "format_byte_offset": 0x0D,
+        "notes": "Same MT Framework engine as RE:R.",
+    },
 }
 
 # PICA format bpp for payload calculation (must stay in sync with decoder.py)
@@ -194,11 +246,24 @@ def parse_capcom_tex_strict(data: bytes, file_path: str = "",
 
     profile = _get_profile(title_id)
 
-    # --- Variant 0: RE:Revelations payload-driven (game profile) ---
+    # --- Variant 0: RER/MH4U payload-driven (game profile) ---
     if has_magic and profile:
         v0 = _try_variant_rer_payload(data, result, title_id, profile)
         if v0:
             return v0
+
+    # --- Variant 0b: payload-driven fallback for any TEX\0 with version byte 0xA5 ---
+    # Catches title IDs not in GAME_PROFILES that use the same MT Framework Mobile layout.
+    if has_magic and not profile and len(data) > 0x04 and data[0x04] == 0xA5:
+        fallback_profile = {
+            "name": "generic_mt_a5",
+            "format_map": dict(CAPCOM_FORMAT_MAP),
+            "header_offsets": [0x14],
+            "format_byte_offset": 0x0D,
+        }
+        v0b = _try_variant_rer_payload(data, result, title_id, fallback_profile)
+        if v0b:
+            return v0b
 
     # --- Variant 1: Standard TEX header (generic) ---
     v1 = _try_variant_standard(data, result, title_id)

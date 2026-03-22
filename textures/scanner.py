@@ -24,8 +24,13 @@ from textures.cmb import is_cmb, extract_cmb_textures
 from textures.tex_capcom import is_capcom_tex, parse_capcom_tex_strict
 from textures.shinen_tex import is_shinen_tex, parse_shinen_tex
 from parsers.sarc import is_sarc, parse_sarc
-from parsers.garc import is_garc, parse_garc
+from parsers.garc import is_garc, parse_garc, parse_garc_iter, garc_has_cgfx
+from parsers.narc import is_narc, parse_narc
 from parsers.zar import is_zar, parse_zar
+from parsers.gar import is_gar, parse_gar
+from parsers.darc import is_darc, parse_darc
+from parsers.arc_capcom import is_capcom_arc, parse_capcom_arc
+from parsers.arc_fe import is_fe_arc, parse_fe_arc
 from parsers.lz import is_lz_compressed, decompress_lz
 import numpy as np
 
@@ -102,7 +107,7 @@ class FileFingerprint:
         if is_yaz0(data):
             self.detected_type = "yaz0"
             self.confidence = "high"
-        elif self.ext in (".lz", ".cmp") and is_lz_compressed(data, self.path):
+        elif self.ext in (".lz", ".cmp", ".chres", ".chtex", ".zrc") and is_lz_compressed(data, self.path):
             self.detected_type = "nintendo_lz"
             self.confidence = "high"
         elif is_garc(data):
@@ -111,8 +116,23 @@ class FileFingerprint:
         elif is_sarc(data):
             self.detected_type = "sarc"
             self.confidence = "high"
+        elif is_narc(data):
+            self.detected_type = "narc"
+            self.confidence = "high"
         elif is_zar(data):
             self.detected_type = "zar"
+            self.confidence = "high"
+        elif is_gar(data):
+            self.detected_type = "gar"
+            self.confidence = "high"
+        elif is_darc(data):
+            self.detected_type = "darc"
+            self.confidence = "high"
+        elif is_capcom_arc(data):
+            self.detected_type = "capcom_arc"
+            self.confidence = "high"
+        elif is_fe_arc(data):
+            self.detected_type = "fe_arc"
             self.confidence = "high"
         elif is_ctxb(data):
             self.detected_type = "ctxb"
@@ -147,11 +167,17 @@ class FileFingerprint:
         elif self.ext == ".ctpk":
             self.detected_type = "ctpk"
             self.confidence = "medium"
-        elif self.ext == ".arc" or self.ext == ".sarc":
+        elif self.ext == ".arc":
+            self.detected_type = "sarc"
+            self.confidence = "medium"
+        elif self.ext == ".sarc":
             self.detected_type = "sarc"
             self.confidence = "medium"
         elif self.ext == ".zar":
             self.detected_type = "zar"
+            self.confidence = "medium"
+        elif self.ext in (".gar", ".lzs"):
+            self.detected_type = "gar"
             self.confidence = "medium"
         elif self.ext == ".ctxb":
             self.detected_type = "ctxb"
@@ -205,8 +231,18 @@ def extract_textures_with_confidence(
         textures = _extract_garc(data, file_path, scan_all=scan_all, title_id=title_id)
     elif fp.detected_type == "zar":
         textures = _extract_zar(data, file_path, scan_all=scan_all, title_id=title_id)
+    elif fp.detected_type == "gar":
+        textures = _extract_gar(data, file_path, scan_all=scan_all, title_id=title_id)
+    elif fp.detected_type == "darc":
+        textures = _extract_darc(data, file_path, scan_all=scan_all, title_id=title_id)
+    elif fp.detected_type == "capcom_arc":
+        textures = _extract_capcom_arc(data, file_path, title_id=title_id)
+    elif fp.detected_type == "fe_arc":
+        textures = _extract_fe_arc(data, file_path, title_id=title_id)
     elif fp.detected_type == "sarc":
         textures = _extract_sarc(data, file_path, scan_all=scan_all, title_id=title_id)
+    elif fp.detected_type == "narc":
+        textures = _extract_narc(data, file_path, scan_all=scan_all, title_id=title_id)
     elif fp.detected_type == "ctxb":
         textures = _extract_ctxb(data, file_path)
     elif fp.detected_type == "cmb":
@@ -242,50 +278,114 @@ def extract_textures_with_confidence(
     return textures, fp
 
 
+def _unwrap_pokemon_container(data: bytes) -> Optional[bytes]:
+    """Unwrap Pokemon GR/PC/PT container formats to extract inner BCH data.
+
+    Pokemon ORAS/XY uses thin wrapper formats around BCH files:
+      PC (Pokemon/Character model): BCH at fixed offset 0x80
+      PT (Pokemon Texture): BCH at fixed offset 0x80
+      GR (Map model): BCH offset stored at +0x04
+    Returns the inner BCH data, or None if not a recognized wrapper.
+    """
+    if len(data) < 0x84:
+        return None
+    magic2 = data[:2]
+    if magic2 in (b'PC', b'PT'):
+        if data[0x80:0x84] == b'BCH\x00':
+            return data[0x80:]
+    elif magic2 == b'GR':
+        bch_off = struct.unpack_from('<I', data, 4)[0]
+        if 0 < bch_off < len(data) and data[bch_off:bch_off + 4] == b'BCH\x00':
+            return data[bch_off:]
+    return None
+
+
 def _extract_garc(data: bytes, file_path: str,
                    scan_all: bool = False,
                    title_id: str = "") -> List[Dict[str, Any]]:
     """Extract textures from inner files within a GARC archive.
 
-    Only processes inner files with recognized texture container formats
-    (CGFX, BCH, CTPK, BFLIM). Skips .bin files to avoid BCH heuristic
-    false positives on model/animation data.
+    Uses streaming iteration to handle large GARCs (1GB+) without
+    loading all inner files into memory at once. Processes:
+      - Direct texture containers (CGFX, BCH, CTPK, BFLIM)
+      - LZ-compressed entries (decompress, then check for textures)
+      - Pokemon wrapper formats (PC, PT, GR → unwrap to inner BCH)
     """
-    inner_files = parse_garc(data)
-    if not inner_files:
+    if not is_garc(data):
         return []
 
     # Check if this GARC contains any CGFX files. If so, skip BCH files
     # entirely — the real textures are in CGFX, and the BCH heuristic
     # parser produces massive false positives on 3D model data.
-    has_cgfx = any(
-        n.lower().endswith('.cgfx') for n, _ in inner_files
-    )
+    has_cgfx = garc_has_cgfx(data)
 
     textures = []
-    for inner_name, inner_data in inner_files:
+    processed = 0
+    for inner_name, inner_data in parse_garc_iter(data):
         if len(inner_data) < 8:
             continue
-        # Only process recognized texture containers from GARCs.
-        # Skip .bin files — they're model/animation data.
+
         ext = inner_name.rsplit('.', 1)[-1].lower() if '.' in inner_name else ''
-        if ext not in ('cgfx', 'bch', 'ctpk', 'bflim', 'sarc'):
-            continue
-        # Skip BCH when CGFX is available — BCH heuristic finds false
-        # positives in model/animation data that shares the GARC.
-        if ext == 'bch' and has_cgfx:
-            continue
-        inner_path = f"{file_path}>{inner_name}"
-        inner_textures, inner_fp = extract_textures_with_confidence(
-            inner_data, inner_path, scan_all=False, title_id=title_id,
-        )
-        for tex in inner_textures:
-            tex["source_file"] = inner_path
-            tex["garc_parent"] = file_path
-        textures.extend(inner_textures)
+
+        # Direct texture container formats
+        if ext in ('cgfx', 'bch', 'ctpk', 'bflim', 'sarc'):
+            if ext == 'bch' and has_cgfx:
+                continue
+            inner_path = f"{file_path}>{inner_name}"
+            inner_textures, _ = extract_textures_with_confidence(
+                inner_data, inner_path, scan_all=False, title_id=title_id,
+            )
+            for tex in inner_textures:
+                tex["source_file"] = inner_path
+                tex["garc_parent"] = file_path
+            textures.extend(inner_textures)
+            processed += 1
+
+        elif ext == 'bin':
+            # Try LZ decompression for .bin files (common in Pokemon GARCs)
+            work = inner_data
+            is_compressed = False
+            if inner_data[0] in (0x10, 0x11) and len(inner_data) > 16:
+                try:
+                    dec = decompress_lz(inner_data)
+                    if dec and len(dec) >= 8:
+                        work = dec
+                        is_compressed = True
+                except Exception:
+                    continue
+
+            # Check for Pokemon wrapper formats (PC/PT/GR → BCH inside)
+            unwrapped = _unwrap_pokemon_container(work)
+            if unwrapped is not None:
+                suffix = "[lz]" if is_compressed else ""
+                inner_path = f"{file_path}>{inner_name}{suffix}[unwrap]"
+                inner_textures, _ = extract_textures_with_confidence(
+                    unwrapped, inner_path, scan_all=False, title_id=title_id,
+                )
+                for tex in inner_textures:
+                    tex["source_file"] = inner_path
+                    tex["garc_parent"] = file_path
+                textures.extend(inner_textures)
+                processed += 1
+            elif work[:4] in (b'BCH\x00', b'CGFX', b'CTPK'):
+                # LZ-compressed texture container (no wrapper)
+                suffix = "[lz]" if is_compressed else ""
+                inner_path = f"{file_path}>{inner_name}{suffix}"
+                inner_textures, _ = extract_textures_with_confidence(
+                    work, inner_path, scan_all=False, title_id=title_id,
+                )
+                for tex in inner_textures:
+                    tex["source_file"] = inner_path
+                    tex["garc_parent"] = file_path
+                textures.extend(inner_textures)
+                processed += 1
+
+        # Progress indicator for large GARCs
+        if processed > 0 and processed % 500 == 0:
+            logger.info(f"GARC {file_path}: processed {processed} files, {len(textures)} textures so far...")
 
     if textures:
-        logger.info(f"GARC {file_path}: {len(inner_files)} inner files, {len(textures)} textures")
+        logger.info(f"GARC {file_path}: {processed} files processed, {len(textures)} textures")
     return textures
 
 
@@ -365,6 +465,83 @@ def _extract_zar(data: bytes, file_path: str,
     return textures
 
 
+def _extract_gar(data: bytes, file_path: str,
+                  scan_all: bool = False,
+                  title_id: str = "") -> List[Dict[str, Any]]:
+    """Extract textures from inner files within a GAR archive."""
+    textures = []
+    for idx, inner_name, inner_data in parse_gar(data):
+        if len(inner_data) < 8:
+            continue
+        inner_path = f"{file_path}>{inner_name}"
+        inner_textures, _ = extract_textures_with_confidence(
+            inner_data, inner_path, scan_all=False, title_id=title_id,
+        )
+        for tex in inner_textures:
+            tex["source_file"] = inner_path
+        textures.extend(inner_textures)
+
+    if textures:
+        logger.info(f"GAR {file_path}: {len(textures)} textures")
+    return textures
+
+
+def _extract_darc(data: bytes, file_path: str,
+                   scan_all: bool = False,
+                   title_id: str = "") -> List[Dict[str, Any]]:
+    """Extract textures from inner files within a darc archive."""
+    textures = []
+    for inner_name, inner_data in parse_darc(data):
+        if len(inner_data) < 8:
+            continue
+        inner_path = f"{file_path}>{inner_name}"
+        inner_textures, _ = extract_textures_with_confidence(
+            inner_data, inner_path, scan_all=False, title_id=title_id,
+        )
+        for tex in inner_textures:
+            tex["source_file"] = inner_path
+            tex["darc_parent"] = file_path
+        textures.extend(inner_textures)
+
+    if textures:
+        logger.info(f"darc {file_path}: {len(textures)} textures")
+    return textures
+
+
+def _extract_capcom_arc(data: bytes, file_path: str,
+                        title_id: str = "") -> List[Dict[str, Any]]:
+    """Extract TEX textures from a Capcom MT Framework ARC archive."""
+    textures = []
+    for fname, tex_data in parse_capcom_arc(data):
+        inner_path = f"{file_path}>{fname}"
+        results = _extract_capcom(tex_data, inner_path, title_id=title_id)
+        for r in results:
+            r["source_file"] = inner_path
+            r["arc_parent"] = file_path
+        textures.extend(results)
+
+    if textures:
+        logger.info(f"Capcom ARC {file_path}: {len(textures)} textures")
+    return textures
+
+
+def _extract_fe_arc(data: bytes, file_path: str,
+                    title_id: str = "") -> List[Dict[str, Any]]:
+    """Extract CTPK textures from a Fire Emblem IS ARC archive."""
+    textures = []
+    for idx, inner_name, inner_data in parse_fe_arc(data):
+        inner_path = f"{file_path}>{inner_name}"
+        results = _extract_ctpk(inner_data, inner_path)
+        for r in results:
+            r["source_file"] = inner_path
+            r["fe_arc_parent"] = file_path
+        textures.extend(results)
+
+    if textures:
+        logger.info(f"FE ARC {file_path}: {len(textures)} textures")
+    return textures
+
+
 def _extract_cmb(data: bytes, file_path: str) -> List[Dict[str, Any]]:
     """Extract textures embedded in a CMB model file."""
     results = extract_cmb_textures(data)
@@ -437,6 +614,32 @@ def _extract_sarc(data: bytes, file_path: str,
 
     if textures:
         logger.info(f"SARC {file_path}: {len(inner_files)} inner files, {len(textures)} textures")
+    return textures
+
+
+def _extract_narc(data: bytes, file_path: str,
+                   scan_all: bool = False,
+                   title_id: str = "") -> List[Dict[str, Any]]:
+    """Extract textures from inner files within a NARC archive."""
+    inner_files = parse_narc(data)
+    if not inner_files:
+        return []
+
+    textures = []
+    for inner_name, inner_data in inner_files:
+        if len(inner_data) < 8:
+            continue
+        inner_path = f"{file_path}>narc_{inner_name}"
+        inner_textures, inner_fp = extract_textures_with_confidence(
+            inner_data, inner_path, scan_all=scan_all, title_id=title_id,
+        )
+        for tex in inner_textures:
+            tex["source_file"] = inner_path
+            tex["narc_parent"] = file_path
+        textures.extend(inner_textures)
+
+    if textures:
+        logger.info(f"NARC {file_path}: {len(inner_files)} inner files, {len(textures)} textures")
     return textures
 
 

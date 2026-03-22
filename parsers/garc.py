@@ -9,12 +9,9 @@ Each FATB entry is fixed 16 bytes: vector(4) + start(4) + end(4) + length(4).
 
 import logging
 import struct
-from typing import List, Tuple
+from typing import List, Tuple, Iterator, Optional
 
 logger = logging.getLogger(__name__)
-
-# Skip GARCs larger than this to avoid excessive memory use
-MAX_GARC_SIZE = 500 * 1024 * 1024  # 500 MB
 
 
 def is_garc(data: bytes) -> bool:
@@ -23,26 +20,78 @@ def is_garc(data: bytes) -> bool:
 
 
 def parse_garc(data: bytes) -> List[Tuple[str, bytes]]:
-    """
-    Parse a GARC archive and return inner files as (name, data) tuples.
-    GARC files don't have filenames, so names are generated as index-based.
+    """Parse a GARC archive and return inner files as (name, data) tuples.
+
+    For small/medium GARCs, returns a list for backward compatibility.
+    For large GARCs, callers should use parse_garc_iter() instead.
     """
     if not is_garc(data):
         return []
 
-    file_len = len(data)
-    if file_len > MAX_GARC_SIZE:
-        logger.info(f"GARC: skipping {file_len / 1024 / 1024:.0f} MB archive (limit {MAX_GARC_SIZE // 1024 // 1024} MB)")
-        return []
-
     try:
-        return _parse_garc_inner(data)
+        return list(_garc_iter(data))
     except Exception as e:
         logger.warning(f"GARC parse error: {e}")
         return []
 
 
-def _parse_garc_inner(data: bytes) -> List[Tuple[str, bytes]]:
+def parse_garc_iter(data: bytes) -> Iterator[Tuple[str, bytes]]:
+    """Parse a GARC archive and yield inner files one at a time.
+
+    Memory-efficient: only one inner file's data exists at a time
+    (assuming the caller doesn't hold references to previous yields).
+    """
+    if not is_garc(data):
+        return
+
+    try:
+        yield from _garc_iter(data)
+    except Exception as e:
+        logger.warning(f"GARC parse error: {e}")
+
+
+def garc_entry_count(data: bytes) -> int:
+    """Return the number of entries in a GARC without extracting them."""
+    if not is_garc(data):
+        return 0
+    try:
+        return _garc_count(data)
+    except Exception:
+        return 0
+
+
+def garc_has_cgfx(data: bytes) -> bool:
+    """Check if any GARC entry starts with CGFX magic, without extracting all data."""
+    if not is_garc(data):
+        return False
+    try:
+        for _, inner in _garc_iter(data):
+            if len(inner) >= 4 and inner[:4] == b'CGFX':
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _garc_count(data: bytes) -> int:
+    """Read just the FATB entry count from GARC header."""
+    file_len = len(data)
+    hdr_size = struct.unpack_from('<I', data, 4)[0]
+
+    fato_off = hdr_size
+    if fato_off + 12 > file_len or data[fato_off:fato_off + 4] != b'OTAF':
+        return 0
+
+    fato_size = struct.unpack_from('<I', data, fato_off + 4)[0]
+    fatb_off = fato_off + fato_size
+    if fatb_off + 12 > file_len or data[fatb_off:fatb_off + 4] != b'BTAF':
+        return 0
+
+    return struct.unpack_from('<I', data, fatb_off + 8)[0]
+
+
+def _garc_iter(data: bytes) -> Iterator[Tuple[str, bytes]]:
+    """Core GARC parser — yields (name, data) for each entry."""
     file_len = len(data)
 
     # GARC header (0x1C bytes)
@@ -51,33 +100,32 @@ def _parse_garc_inner(data: bytes) -> List[Tuple[str, bytes]]:
 
     if bom not in (0xFEFF, 0xFFFE):
         logger.warning(f"GARC: unexpected BOM 0x{bom:04X}")
-        return []
+        return
 
     data_offset = struct.unpack_from('<I', data, 16)[0]
 
     # FATO section
     fato_off = hdr_size
     if fato_off + 12 > file_len:
-        return []
+        return
     if data[fato_off:fato_off + 4] != b'OTAF':
         logger.warning(f"GARC: expected OTAF, got {data[fato_off:fato_off+4]!r}")
-        return []
+        return
 
     fato_size = struct.unpack_from('<I', data, fato_off + 4)[0]
 
     # FATB section
     fatb_off = fato_off + fato_size
     if fatb_off + 12 > file_len:
-        return []
+        return
     if data[fatb_off:fatb_off + 4] != b'BTAF':
         logger.warning(f"GARC: expected BTAF, got {data[fatb_off:fatb_off+4]!r}")
-        return []
+        return
 
     fatb_entry_count = struct.unpack_from('<I', data, fatb_off + 8)[0]
 
     # Each FATB entry is fixed 16 bytes: vector(4) + start(4) + end(4) + length(4)
     entries_start = fatb_off + 12
-    results = []
 
     for i in range(fatb_entry_count):
         base = entries_start + i * 16
@@ -99,10 +147,7 @@ def _parse_garc_inner(data: bytes) -> List[Tuple[str, bytes]]:
         inner_data = data[abs_start:abs_end]
         ext = _guess_extension(inner_data)
         name = f"{i:04d}{ext}"
-        results.append((name, inner_data))
-
-    logger.debug(f"GARC: {fatb_entry_count} entries, {len(results)} files extracted")
-    return results
+        yield (name, inner_data)
 
 
 def _guess_extension(data: bytes) -> str:

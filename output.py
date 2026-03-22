@@ -13,7 +13,7 @@ import hashlib
 import logging
 import numpy as np
 from PIL import Image
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from textures.decoder import get_format_name
 
 logger = logging.getLogger(__name__)
@@ -191,6 +191,30 @@ def write_summary(output_dir: str, summary: Dict[str, Any]):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
     logger.info(f"Wrote summary.json")
+
+
+def compute_dedup_stats(output_dir: str) -> Tuple[int, int, int]:
+    """
+    Hash all PNGs in the textures/ subdir by file content.
+    Returns (total, unique, duplicates).
+    """
+    hashes: Dict[str, int] = {}
+    tex_dir = os.path.join(output_dir, "textures")
+    if not os.path.isdir(tex_dir):
+        return 0, 0, 0
+    for root, dirs, files in os.walk(tex_dir):
+        for f in files:
+            if f.endswith(".png"):
+                path = os.path.join(root, f)
+                try:
+                    with open(path, 'rb') as fh:
+                        h = hashlib.md5(fh.read()).hexdigest()
+                    hashes[h] = hashes.get(h, 0) + 1
+                except OSError:
+                    pass
+    total = sum(hashes.values())
+    unique = len(hashes)
+    return total, unique, total - unique
 
 
 # Legacy compat

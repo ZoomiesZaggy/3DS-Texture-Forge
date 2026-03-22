@@ -54,9 +54,9 @@ def extract_cmb_textures(data: bytes) -> List[Dict[str, Any]]:
         if num_sections < 1 or num_sections > 20:
             return []
 
-        # Read section offsets to find the last one (texture data section)
+        # Read exactly num_sections offsets from the section pointer table
         offsets = []
-        for i in range(min(num_sections + 3, 12)):
+        for i in range(num_sections):
             off_pos = cmb_idx + 0x20 + i * 4
             if off_pos + 4 > file_len:
                 break

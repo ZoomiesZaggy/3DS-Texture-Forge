@@ -23,6 +23,12 @@ from typing import List, Dict, Any, Optional, Tuple
 
 import numpy as np
 
+try:
+    import xxhash as _xxhash
+    _HAS_XXHASH = True
+except ImportError:
+    _HAS_XXHASH = False
+
 from parsers.ncsd import NCSDParser
 from parsers.cia import CIAParser
 from parsers.ncch import NCCHParser
@@ -39,6 +45,7 @@ from output import (
     save_texture_as_png, generate_output_filename, build_output_path,
     save_raw_data, make_texture_record, write_manifest, write_failures,
     write_unknown_files, write_summary, sha1_bytes, sha1_rgba,
+    compute_dedup_stats,
 )
 from quality import compute_quality_metrics
 from contact_sheet import generate_contact_sheet
@@ -141,7 +148,10 @@ def should_process_file(file_path: str, scan_all: bool) -> bool:
                ".bcmdl", ".bctex", ".bcmcla", ".szs", ".zar", ".zsi",
                ".bccam", ".bcsdr", ".bcptl", ".bhres", ".bhtex", ".cbres",
                ".lz", ".cmp",
-               ".bin", ".raw", ".dat", ".img", ".arc", ".sarc", ".garc"}:
+               ".chres", ".chtex",
+               ".gar", ".lzs",
+               ".zrc",
+               ".bin", ".raw", ".dat", ".img", ".arc", ".sarc", ".garc", ".narc"}:
         return True
     path_lower = file_path.lower()
     for d in ["/tex/", "/texture/", "/textures/", "/gui/", "/effect/",
@@ -243,6 +253,9 @@ def cmd_extract(args, progress_callback=None):
     suspicious_count = 0
     unknown_types = 0
     tex_global_idx = 0
+    # Dedup: md5(rgba_bytes) -> tex_id of first occurrence
+    seen_content_hashes: Dict[str, str] = {}
+    dedup_active = getattr(args, 'dedup', False)
 
     for file_idx, (file_path, file_offset, file_size) in enumerate(files):
         if not should_process_file(file_path, args.scan_all):
@@ -361,9 +374,49 @@ def cmd_extract(args, progress_callback=None):
             # Quality check
             qm = compute_quality_metrics(rgba)
 
-            # Save PNG
+            # Dedup check
+            content_hash = hashlib.md5(rgba.tobytes()).hexdigest()
+            duplicate_of = ""
+            if content_hash in seen_content_hashes:
+                duplicate_of = seen_content_hashes[content_hash]
+            else:
+                seen_content_hashes[content_hash] = tex_id
+
+            # Save PNG (skip if dedup mode and this is a duplicate)
             fname = generate_output_filename(tex_global_idx, tex_info, file_path)
             out_path = build_output_path(output_dir, file_path, fname)
+
+            if dedup_active and duplicate_of:
+                # Count it but don't write the file
+                decoded_ok += 1
+                if qm["is_suspicious"]:
+                    suspicious_count += 1
+                rel_png = ""
+                rec = make_texture_record(
+                    tex_id=tex_id,
+                    source_rom=rom_basename,
+                    source_container_chain=chain,
+                    source_file_path=file_path,
+                    source_offset=file_offset,
+                    detected_format=get_format_name(fmt),
+                    width=w, height=h,
+                    mip_count=tex_info.get("mip_count", 1),
+                    raw_data_size=len(pixel_data),
+                    decoded_png_path=rel_png,
+                    confidence=confidence,
+                    parser_used=parser_used,
+                    notes=notes_str,
+                    sha1_rgba_val=sha1_rgba(rgba),
+                    sha1_source_val=source_blob_sha1,
+                    quality_metrics=qm,
+                )
+                rec["content_hash"] = content_hash
+                rec["duplicate_of"] = duplicate_of
+                if _HAS_XXHASH and pixel_data:
+                    rec["raw_data_hash_xxh64"] = _xxhash.xxh64(pixel_data).hexdigest().upper()
+                records.append(rec)
+                tex_global_idx += 1
+                continue
 
             if not save_texture_as_png(rgba, out_path, pica_format=fmt):
                 failures.append({
@@ -402,6 +455,9 @@ def cmd_extract(args, progress_callback=None):
                 sha1_source_val=source_blob_sha1,
                 quality_metrics=qm,
             )
+            rec["content_hash"] = content_hash
+            if _HAS_XXHASH and pixel_data:
+                rec["raw_data_hash_xxh64"] = _xxhash.xxh64(pixel_data).hexdigest().upper()
             records.append(rec)
             tex_global_idx += 1
 
@@ -430,6 +486,12 @@ def cmd_extract(args, progress_callback=None):
 
     elapsed = time.time() - t0
 
+    # Dedup stats from records
+    all_hashes = [r.get("content_hash", "") for r in records if r.get("content_hash")]
+    textures_unique = len(set(all_hashes)) if all_hashes else decoded_ok
+    textures_duplicate = decoded_ok - textures_unique
+    dup_pct = round(textures_duplicate / decoded_ok * 100, 1) if decoded_ok > 0 else 0.0
+
     summary = {
         "title_id": title_id,
         "game_title": game_title,
@@ -437,21 +499,33 @@ def cmd_extract(args, progress_callback=None):
         "files_scanned": files_scanned,
         "containers_recognized": containers_recognized,
         "textures_decoded_ok": decoded_ok,
+        "textures_unique": textures_unique,
+        "textures_duplicate": textures_duplicate,
+        "duplicate_pct": dup_pct,
         "textures_failed": decoded_fail,
         "suspicious_outputs": suspicious_count,
         "unknown_file_types": unknown_types,
         "elapsed_seconds": round(elapsed, 1),
         "contact_sheet": cs_path if cs_path else None,
+        "dedup_mode": dedup_active,
     }
     write_summary(output_dir, summary)
 
     # CLI output
+    if dedup_active:
+        written = decoded_ok - textures_duplicate
+        tex_line = f"  Textures found:         {decoded_ok:,} ({written:,} written, --dedup active)"
+    elif textures_duplicate > 0:
+        tex_line = f"  Textures decoded OK:    {decoded_ok:,} ({textures_unique:,} unique, {dup_pct}% duplicates)"
+    else:
+        tex_line = f"  Textures decoded OK:    {decoded_ok:,} ({textures_unique:,} unique)"
+
     print(f"\n{'='*56}")
     print(f"  Extraction Results")
     print(f"{'='*56}")
     print(f"  Files scanned:          {files_scanned}")
     print(f"  Recognized containers:  {containers_recognized}")
-    print(f"  Textures decoded OK:    {decoded_ok}")
+    print(tex_line)
     print(f"  Textures failed:        {decoded_fail}")
     print(f"  Suspicious outputs:     {suspicious_count}")
     print(f"  Unknown file types:     {unknown_types}")
@@ -736,6 +810,8 @@ def build_parser():
     p_ext.add_argument("--scan-all", action="store_true")
     p_ext.add_argument("--dump-raw", action="store_true")
     p_ext.add_argument("--list-files", action="store_true")
+    p_ext.add_argument("--dedup", action="store_true",
+                       help="Skip writing duplicate textures (keep first copy only)")
     p_ext.add_argument("--verbose", action="store_true")
     p_ext.add_argument("--quiet", action="store_true")
 

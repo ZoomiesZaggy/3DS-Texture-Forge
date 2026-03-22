@@ -391,29 +391,53 @@ class AboutDialog(QDialog):
         text.setOpenExternalLinks(True)
         text.setStyleSheet(f"background: {COL_BG_DARKER}; border: none; color: {COL_TEXT};")
         text.setHtml(f"""
-            <h2 style="color:{COL_TEXT};">3DS Texture Forge v1.0</h2>
+            <h2 style="color:{COL_TEXT};">3DS Texture Forge v1.1-beta</h2>
             <p>Extracts textures from decrypted Nintendo 3DS game ROMs.
             Textures are saved as PNG files organized by source.</p>
 
-            <p><b>Tested games:</b></p>
-            <table cellspacing="4">
+            <p><b>Tested games (22 games, ~388,000 textures):</b></p>
+            <table cellspacing="3">
             <tr><td style="color:{COL_GREEN};">&#10004;</td>
-                <td>Resident Evil: Revelations</td><td style="color:{COL_TEXT_DIM};">1,137 textures</td></tr>
+                <td>Pokemon Y</td><td style="color:{COL_TEXT_DIM};">126,690 textures</td></tr>
             <tr><td style="color:{COL_GREEN};">&#10004;</td>
-                <td>Corpse Party</td><td style="color:{COL_TEXT_DIM};">2,781 textures</td></tr>
+                <td>Kid Icarus: Uprising</td><td style="color:{COL_TEXT_DIM};">58,210 textures</td></tr>
             <tr><td style="color:{COL_GREEN};">&#10004;</td>
-                <td>Pokemon Y</td><td style="color:{COL_TEXT_DIM};">8,015 textures</td></tr>
+                <td>Kirby: Triple Deluxe</td><td style="color:{COL_TEXT_DIM};">51,059 textures</td></tr>
+            <tr><td style="color:{COL_GREEN};">&#10004;</td>
+                <td>Pokemon Omega Ruby</td><td style="color:{COL_TEXT_DIM};">36,433 textures</td></tr>
+            <tr><td style="color:{COL_GREEN};">&#10004;</td>
+                <td>Monster Hunter 4 Ultimate</td><td style="color:{COL_TEXT_DIM};">25,685 textures</td></tr>
+            <tr><td style="color:{COL_GREEN};">&#10004;</td>
+                <td>Animal Crossing: New Leaf</td><td style="color:{COL_TEXT_DIM};">19,206 textures</td></tr>
+            <tr><td style="color:{COL_GREEN};">&#10004;</td>
+                <td>Picross 3D: Round 2</td><td style="color:{COL_TEXT_DIM};">12,631 textures</td></tr>
+            <tr><td style="color:{COL_GREEN};">&#10004;</td>
+                <td>Cooking Mama: Sweet Shop</td><td style="color:{COL_TEXT_DIM};">12,050 textures</td></tr>
+            <tr><td style="color:{COL_GREEN};">&#10004;</td>
+                <td>Kirby: Planet Robobot</td><td style="color:{COL_TEXT_DIM};">10,623 textures</td></tr>
+            <tr><td style="color:{COL_GREEN};">&#10004;</td>
+                <td>Bravely Default</td><td style="color:{COL_TEXT_DIM};">8,626 textures</td></tr>
+            <tr><td style="color:{COL_GREEN};">&#10004;</td>
+                <td>Super Mario 3D Land</td><td style="color:{COL_TEXT_DIM};">6,097 textures</td></tr>
+            <tr><td style="color:{COL_GREEN};">&#10004;</td>
+                <td>Zelda: Ocarina of Time 3D</td><td style="color:{COL_TEXT_DIM};">3,584 textures</td></tr>
             <tr><td style="color:{COL_GREEN};">&#10004;</td>
                 <td>Mario Kart 7</td><td style="color:{COL_TEXT_DIM};">2,770 textures</td></tr>
             <tr><td style="color:{COL_GREEN};">&#10004;</td>
-                <td>Zelda: Ocarina of Time 3D</td><td style="color:{COL_TEXT_DIM};">3,584 textures</td></tr>
+                <td>Corpse Party</td><td style="color:{COL_TEXT_DIM};">2,788 textures</td></tr>
+            <tr><td style="color:{COL_GREEN};">&#10004;</td>
+                <td>Resident Evil: Revelations</td><td style="color:{COL_TEXT_DIM};">1,137 textures</td></tr>
+            <tr><td style="color:{COL_GREEN};">&#10004;</td>
+                <td>Fire Emblem: Awakening</td><td style="color:{COL_TEXT_DIM};">868 textures</td></tr>
+            <tr><td style="color:{COL_GREEN};">&#10004;</td>
+                <td style="color:{COL_TEXT_DIM};">+ 6 more games...</td><td></td></tr>
             </table>
 
-            <p style="margin-top:12px;"><b>For Azahar/Citra custom textures:</b><br>
-            Use the emulator's texture dump feature to get hash-based filenames,
-            then replace them with these extracted textures.</p>
+            <p style="margin-top:10px;"><b>For Azahar/Citra custom textures:</b><br>
+            Use <i>import-dump</i> + <i>build-pack</i> to create a ready-to-use pack.<br>
+            The manifest includes raw_data_hash_xxh64 for custom scripting.</p>
 
-            <p style="margin-top:12px;">
+            <p style="margin-top:10px;">
             <a href="https://github.com/ZoomiesZaggy/3DS-Texture-Forge">
             github.com/ZoomiesZaggy/3DS-Texture-Forge</a></p>
         """)
@@ -739,6 +763,9 @@ class MainWindow(QMainWindow):
         self.chk_scan_all = QCheckBox("Deep scan — Try harder to find textures (slower)")
         self.chk_scan_all.setStyleSheet(f"color: {COL_TEXT}; font-size: 11px;")
         adv_layout.addWidget(self.chk_scan_all)
+        self.chk_dedup = QCheckBox("Skip duplicates — Only save unique textures (saves disk space)")
+        self.chk_dedup.setStyleSheet(f"color: {COL_TEXT}; font-size: 11px;")
+        adv_layout.addWidget(self.chk_dedup)
         self.chk_dump_raw = QCheckBox("Save raw data — Also save undecoded texture files")
         self.chk_dump_raw.setStyleSheet(f"color: {COL_TEXT}; font-size: 11px;")
         adv_layout.addWidget(self.chk_dump_raw)
@@ -767,6 +794,7 @@ class MainWindow(QMainWindow):
 
         # Restore saved options
         self.chk_scan_all.setChecked(self.cfg.get("scan_all_files", False))
+        self.chk_dedup.setChecked(self.cfg.get("dedup", False))
         self.chk_dump_raw.setChecked(self.cfg.get("dump_raw", False))
         self.chk_verbose.setChecked(self.cfg.get("verbose_logging", False))
 
@@ -936,6 +964,7 @@ class MainWindow(QMainWindow):
 
         options = {
             "scan_all": self.chk_scan_all.isChecked(),
+            "dedup": self.chk_dedup.isChecked(),
             "dump_raw": self.chk_dump_raw.isChecked(),
             "verbose": self.chk_verbose.isChecked(),
         }
@@ -976,10 +1005,18 @@ class MainWindow(QMainWindow):
             self.btn_extract.setEnabled(True)
 
             # Show results
+            unique = s.get("textures_unique", decoded)
+            dedup_mode = s.get("dedup_mode", False)
             if decoded > 0:
+                if dedup_mode:
+                    written = s.get("textures_unique", decoded)
+                    headline = f'Done! {decoded:,} textures found, {written:,} written from {game_name}'
+                elif unique < decoded:
+                    headline = f'Done! {decoded:,} textures ({unique:,} unique) from {game_name}'
+                else:
+                    headline = f'Done! Extracted {decoded:,} textures from {game_name}'
                 self.lbl_results_headline.setText(
-                    f'<span style="color:{COL_GREEN};">'
-                    f'Done! Extracted {decoded:,} textures from {game_name}</span>'
+                    f'<span style="color:{COL_GREEN};">{headline}</span>'
                 )
             else:
                 self.lbl_results_headline.setText(

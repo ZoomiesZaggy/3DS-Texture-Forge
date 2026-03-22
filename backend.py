@@ -140,6 +140,7 @@ def run_extraction(
             output=output_dir,
             scan_all=options.get("scan_all", False),
             dump_raw=options.get("dump_raw", False),
+            dedup=options.get("dedup", False),
             verbose=options.get("verbose", False),
             quiet=False,
             list_files=False,
