@@ -19,6 +19,7 @@ import logging
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Any, Optional, Tuple
 
 import numpy as np
@@ -144,14 +145,24 @@ def should_process_file(file_path: str, scan_all: bool) -> bool:
     ext = ""
     if "." in file_path:
         ext = "." + file_path.rsplit(".", 1)[-1].lower()
-    if ext in {".tex", ".bch", ".bcres", ".bflim", ".bclim", ".ctpk", ".ctxb", ".cmb", ".cgfx",
+    if ext in {".tex", ".bch", ".bcres", ".bflim", ".bclim", ".ctpk", ".cptk", ".ctxb", ".cmb", ".cgfx",
                ".bcmdl", ".bctex", ".bcmcla", ".szs", ".zar", ".zsi",
                ".bccam", ".bcsdr", ".bcptl", ".bhres", ".bhtex", ".cbres",
                ".lz", ".cmp",
                ".chres", ".chtex",
                ".gar", ".lzs",
                ".zrc",
-               ".bin", ".raw", ".dat", ".img", ".arc", ".sarc", ".garc", ".narc"}:
+               ".fs",
+               ".texturegdb",
+               ".bin", ".raw", ".dat", ".img", ".arc", ".sarc", ".garc", ".narc",
+               # NintendoWare model/effect/texture containers (CGFX-based, e.g. Pac-Man NW4C engine)
+               ".nwmdl", ".nwtex", ".pmnweffb", ".nwenv", ".nwlyt",
+               # Level-5 FA/ARC0 archives (Layton, Yo-Kai Watch)
+               ".fa",
+               # CRI CPK streaming archives (Persona Q, 7th Dragon III, Sonic Lost World)
+               ".cpk",
+               # Bandai Namco jIMG texture files (One Piece)
+               ".jtex", ".jarc"}:
         return True
     path_lower = file_path.lower()
     for d in ["/tex/", "/texture/", "/textures/", "/gui/", "/effect/",
@@ -220,8 +231,17 @@ def cmd_scan(args):
 # ──────────────────────────────────────────────
 
 def cmd_extract(args, progress_callback=None):
-    setup_logging(args.verbose, getattr(args, 'quiet', False))
+    _verbose = getattr(args, 'verbose', False)
+    _quiet = getattr(args, 'quiet', False)
+    # In CLI progress-bar mode (no external callback, not verbose, not quiet),
+    # suppress INFO logs so they don't mix with the progress bar line.
+    _bar_mode = progress_callback is None and not _verbose and not _quiet
+    setup_logging(_verbose, _quiet or _bar_mode)
     t0 = time.time()
+
+    # Thread pool for parallel PNG saves (I/O-bound; GIL released for file writes).
+    _png_pool = ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 4))
+    _png_futures = []  # collect futures to detect late failures
 
     romfs_data, title_id, product_code, chain = parse_rom(args.input)
 
@@ -238,6 +258,84 @@ def cmd_extract(args, progress_callback=None):
         for p, _, s in sorted(files):
             print(f"  {s:>10,d}  {p}")
         return
+
+    # Pre-pass: build lookup for .texturebin companions (Star Fox 64 3D GDB1 pairs)
+    _texturebin_map: Dict[str, int] = {}  # lowercase base_name -> file_idx
+    for _idx, (_fp, _fo, _fs) in enumerate(files):
+        if _fp.lower().endswith(".texturebin"):
+            _base = _fp.rsplit(".", 1)[0].lower()
+            _texturebin_map[_base] = _idx
+
+    # Pre-pass: Smash Bros. 3DS dt/ls pair — inject virtual .bch entries
+    _smash_virtual_params: Dict[int, tuple] = {}  # file_idx -> (dt_off, comp_sz)
+    _smash_dt_rom_off: int = 0
+    _ls_entry = next(
+        ((p, o, s) for p, o, s in files if p.lower().lstrip("/") == "ls"), None
+    )
+    _dt_entry = next(
+        ((p, o, s) for p, o, s in files if p.lower().lstrip("/") == "dt"), None
+    )
+    if _ls_entry and _dt_entry:
+        _ls_raw = romfs_data[_ls_entry[1] : _ls_entry[1] + _ls_entry[2]]
+        from parsers.smash_dt import (
+            parse_ls as _parse_ls,
+            is_texture_resource as _is_tex_res,
+            decompress_resource as _smash_decomp,
+            LS_MAGIC as _LS_MAGIC,
+        )
+        if _ls_raw[:4] == _LS_MAGIC:
+            _smash_dt_rom_off = _dt_entry[1]
+            _v_base = len(files)
+            logger.info("Smash Bros dt/ls detected — scanning %d entries", len(_parse_ls(_ls_raw)))
+            for _si, (_sh, _sdt_off, _scomp_sz) in enumerate(_parse_ls(_ls_raw)):
+                if _scomp_sz < 100 or _scomp_sz > 50 * 1024 * 1024:
+                    continue
+                # Quick probe: check zlib magic without full decompress
+                _probe = romfs_data[
+                    _smash_dt_rom_off + _sdt_off :
+                    _smash_dt_rom_off + _sdt_off + min(_scomp_sz, 600)
+                ]
+                _has_zlib = any(
+                    _probe[i : i + 2] in {b"\x78\x9C", b"\x78\xDA", b"\x78\x01", b"\x78\x5E"}
+                    for i in range(min(512, len(_probe) - 1))
+                )
+                if not _has_zlib:
+                    continue
+                v_idx = _v_base + _si
+                files.append((f"dt_smash_{_sh:08X}.bch", 0, _scomp_sz))
+                _smash_virtual_params[v_idx] = (_sdt_off, _scomp_sz)
+
+    # CLI progress bar — only active when no external progress_callback (GUI) and not quiet
+    _bar_start = time.time()
+    _bar_last_print = [0.0]
+    _cli_bar_width = 30
+
+    def _cli_progress(cur, total, _path, _a, tex_count, _b):
+        if getattr(args, 'quiet', False):
+            return
+        now = time.time()
+        if now - _bar_last_print[0] < 0.15 and cur < total:
+            return
+        _bar_last_print[0] = now
+        elapsed_s = now - _bar_start
+        pct = cur / total if total > 0 else 0.0
+        filled = int(_cli_bar_width * pct)
+        bar = "=" * filled + "-" * (_cli_bar_width - filled)
+        eta_str = ""
+        if pct > 0.01 and elapsed_s > 1:
+            remaining = elapsed_s / pct * (1 - pct)
+            m, s = divmod(int(remaining), 60)
+            eta_str = f" | ETA: {m}:{s:02d}"
+        line = (f"\r  [{bar}] {pct*100:4.0f}% | "
+                f"File {cur}/{total} | {tex_count:,} textures{eta_str}   ")
+        sys.stderr.write(line)
+        sys.stderr.flush()
+        if cur == total:
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+
+    if progress_callback is None:
+        progress_callback = _cli_progress
 
     rom_basename = os.path.basename(args.input)
     records: List[Dict[str, Any]] = []
@@ -256,6 +354,9 @@ def cmd_extract(args, progress_callback=None):
     # Dedup: md5(rgba_bytes) -> tex_id of first occurrence
     seen_content_hashes: Dict[str, str] = {}
     dedup_active = getattr(args, 'dedup', False)
+    # Raw-hash dedup: xxh64(raw_pixel_bytes) -> (tex_id, content_hash) of first occurrence
+    # Allows skipping decode entirely when pixel data is identical
+    seen_raw_hashes: Dict[str, tuple] = {}
 
     for file_idx, (file_path, file_offset, file_size) in enumerate(files):
         if not should_process_file(file_path, args.scan_all):
@@ -263,39 +364,100 @@ def cmd_extract(args, progress_callback=None):
 
         files_scanned += 1
         if progress_callback:
-            progress_callback(files_scanned, len(files), file_path, "", 0, 0)
-        try:
-            _, file_data = romfs.read_file_by_index(file_idx)
-        except Exception as e:
-            logger.warning(f"Cannot read {file_path}: {e}")
-            continue
+            progress_callback(files_scanned, len(files), file_path, "", decoded_ok, 0)
+
+        # Fast magic pre-check: skip known non-texture formats without reading large files.
+        # This avoids expensive ROM reads for game-data files (Wwise audio, etc.).
+        # BG4\x00 is intentionally NOT skipped — BG4 files embed BCH textures.
+        _SKIP_MAGICS = {b"BKHD", b"AKPK", b"CSAR", b"NUS3", b"RIFF"}
+        if file_idx not in _smash_virtual_params and file_size > 0 and file_offset > 0:
+            _peek = romfs_data[file_offset : file_offset + 4]
+            if _peek in _SKIP_MAGICS:
+                unknown_types += 1
+                unknowns.append({"path": file_path, "detected_type": None,
+                                  "magic": _peek.hex(), "size": file_size})
+                continue
+
+        # Virtual Smash Bros dt resource — decompress on demand
+        if file_idx in _smash_virtual_params:
+            _sdt_off, _scomp_sz = _smash_virtual_params[file_idx]
+            _raw = romfs_data[
+                _smash_dt_rom_off + _sdt_off :
+                _smash_dt_rom_off + _sdt_off + _scomp_sz
+            ]
+            file_data = _smash_decomp(_raw)
+            if not file_data or file_data[:4] not in {b"BCH\x00", b"CGFX", b"CTPK"}:
+                continue
+        else:
+            try:
+                _, file_data = romfs.read_file_by_index(file_idx)
+            except Exception as e:
+                logger.warning(f"Cannot read {file_path}: {e}")
+                continue
 
         if len(file_data) < 8:
             continue
 
-        # --- Capcom .tex special handling for RE:Revelations ---
         ext = ""
         if "." in file_path:
             ext = "." + file_path.rsplit(".", 1)[-1].lower()
+
+        # --- Capcom .tex special handling for RE:Revelations ---
 
         if ext == ".tex" or file_data[:4] in (b"TEX\x00", b"\x00XET"):
             tex_result = parse_capcom_tex_strict(file_data, file_path,
                                                   title_id=title_id)
             tex_reports.append(tex_result.to_dict())
 
-        # --- General extraction ---
-        textures, fp = extract_textures_with_confidence(
-            file_data, file_path, scan_all=args.scan_all,
-            title_id=title_id,
-        )
+        # --- GDB1 pair handling (Star Fox 64 3D .texturegdb + .texturebin) ---
+        try:
+            if ext == ".texturegdb":
+                from textures.gdb1 import is_gdb1 as _is_gdb1, parse_gdb1_pair as _parse_gdb1
+                from textures.scanner import fingerprint_file as _ff_file
+                fp = _ff_file(file_data, file_path)
+                if _is_gdb1(file_data):
+                    bin_key = file_path.rsplit(".", 1)[0].lower()
+                    bin_idx = _texturebin_map.get(bin_key)
+                    if bin_idx is not None:
+                        try:
+                            _, bin_data = romfs.read_file_by_index(bin_idx)
+                            textures = _parse_gdb1(file_data, bin_data, file_path)
+                        except Exception as _ge:
+                            logger.warning(f"GDB1 pair read failed for {file_path}: {_ge}")
+                            textures = []
+                    else:
+                        logger.debug(f"GDB1: no .texturebin companion for {file_path}")
+                        textures = []
+                else:
+                    textures = []
+                containers_recognized += 1
 
-        if fp.detected_type:
-            containers_recognized += 1
-        elif not textures:
-            unknown_types += 1
-            unknowns.append(fp.to_dict())
+            else:
+                # --- General extraction ---
+                textures, fp = extract_textures_with_confidence(
+                    file_data, file_path, scan_all=args.scan_all,
+                    title_id=title_id,
+                )
+
+                if fp.detected_type:
+                    containers_recognized += 1
+                elif not textures:
+                    unknown_types += 1
+                    unknowns.append(fp.to_dict())
+
+        except Exception as _container_exc:
+            logger.warning(f"Container extraction failed for {file_path}: {_container_exc}")
+            failures.append({
+                "id": f"file_{files_scanned}",
+                "source_file_path": file_path,
+                "reason": f"container error: {_container_exc}",
+                "parser_used": "unknown",
+            })
+            decoded_fail += 1
+            continue
 
         for tex_info in textures:
+          try:
             fmt = tex_info.get("format", 0)
             w = tex_info.get("width", 0)
             h = tex_info.get("height", 0)
@@ -319,6 +481,43 @@ def cmd_extract(args, progress_callback=None):
                 decoded_fail += 1
                 tex_global_idx += 1
                 continue
+
+            # Phase 4a: In --dedup mode, skip decode entirely if raw pixel bytes
+            # are identical to a previously decoded texture (same bytes → same output).
+            if dedup_active and _HAS_XXHASH and pixel_data:
+                raw_hash_key = _xxhash.xxh64(pixel_data).hexdigest().upper()
+                if raw_hash_key in seen_raw_hashes:
+                    first_tex_id, first_content_hash = seen_raw_hashes[raw_hash_key]
+                    decoded_ok += 1
+                    fname = generate_output_filename(tex_global_idx, tex_info, file_path)
+                    rec = make_texture_record(
+                        tex_id=tex_id,
+                        source_rom=rom_basename,
+                        source_container_chain=chain,
+                        source_file_path=file_path,
+                        source_offset=file_offset,
+                        detected_format=get_format_name(fmt),
+                        width=w, height=h,
+                        mip_count=tex_info.get("mip_count", 1),
+                        raw_data_size=len(pixel_data),
+                        decoded_png_path="",
+                        confidence=confidence,
+                        parser_used=parser_used,
+                        notes=notes_str,
+                        sha1_rgba_val="",
+                        sha1_source_val=source_blob_sha1,
+                        quality_metrics={"is_suspicious": False,
+                                         "pct_transparent": 0,
+                                         "variance_score": 0},
+                    )
+                    rec["content_hash"] = first_content_hash
+                    rec["duplicate_of"] = first_tex_id
+                    rec["raw_data_hash_xxh64"] = raw_hash_key
+                    records.append(rec)
+                    tex_global_idx += 1
+                    continue
+            else:
+                raw_hash_key = None
 
             try:
                 rgba = decode_texture_fast(pixel_data, w, h, fmt)
@@ -358,29 +557,40 @@ def cmd_extract(args, progress_callback=None):
             # - Two-color textures from the fallback scanner are also garbage
             if parser_used == "bch":
                 flat = rgba.reshape(-1, 4)
-                sample = flat[:min(2000, len(flat))]
-                unique_colors = len(np.unique(sample, axis=0))
-                if unique_colors <= 1:
+                n_sample = min(2000, len(flat))
+                sample = flat[:n_sample]
+                # View RGBA uint8 as uint32 — 7x faster than np.unique(axis=0)
+                sample_u32 = np.ascontiguousarray(sample).view(np.uint32).ravel()
+                # Solid-color check: min==max in O(n) without sorting
+                if sample_u32.min() == sample_u32.max():
                     logger.debug(f"BCH filter: skipping {w}x{h} (solid color)")
                     tex_global_idx += 1
                     continue
-                # For extreme aspect ratio textures, require more color variety
+                # Thin-strip check only when needed (rare)
                 aspect = max(w, h) / max(min(w, h), 1)
-                if aspect > 8 and unique_colors <= 3:
-                    logger.debug(f"BCH filter: skipping {w}x{h} (thin strip, {unique_colors} colors)")
-                    tex_global_idx += 1
-                    continue
+                if aspect > 8:
+                    unique_colors = len(np.unique(sample_u32))
+                    if unique_colors <= 3:
+                        logger.debug(f"BCH filter: skipping {w}x{h} (thin strip, {unique_colors} colors)")
+                        tex_global_idx += 1
+                        continue
 
-            # Quality check
-            qm = compute_quality_metrics(rgba)
-
-            # Dedup check
+            # Dedup check (before quality metrics — skip expensive quality for dups)
             content_hash = hashlib.md5(rgba.tobytes()).hexdigest()
             duplicate_of = ""
             if content_hash in seen_content_hashes:
                 duplicate_of = seen_content_hashes[content_hash]
             else:
                 seen_content_hashes[content_hash] = tex_id
+
+            # Quality check — only for unique (first-occurrence) textures.
+            # Duplicates are not written to disk, so quality info is not needed
+            # for the contact sheet or visual review.
+            if not duplicate_of:
+                qm = compute_quality_metrics(rgba)
+            else:
+                qm = {"is_suspicious": False, "pct_transparent": 0.0,
+                      "variance_score": 0.0, "unique_colors": 0}
 
             # Save PNG (skip if dedup mode and this is a duplicate)
             fname = generate_output_filename(tex_global_idx, tex_info, file_path)
@@ -389,8 +599,6 @@ def cmd_extract(args, progress_callback=None):
             if dedup_active and duplicate_of:
                 # Count it but don't write the file
                 decoded_ok += 1
-                if qm["is_suspicious"]:
-                    suspicious_count += 1
                 rel_png = ""
                 rec = make_texture_record(
                     tex_id=tex_id,
@@ -406,7 +614,7 @@ def cmd_extract(args, progress_callback=None):
                     confidence=confidence,
                     parser_used=parser_used,
                     notes=notes_str,
-                    sha1_rgba_val=sha1_rgba(rgba),
+                    sha1_rgba_val="",
                     sha1_source_val=source_blob_sha1,
                     quality_metrics=qm,
                 )
@@ -418,15 +626,13 @@ def cmd_extract(args, progress_callback=None):
                 tex_global_idx += 1
                 continue
 
-            if not save_texture_as_png(rgba, out_path, pica_format=fmt):
-                failures.append({
-                    "id": tex_id,
-                    "source_file_path": file_path,
-                    "reason": "PNG save failed",
-                })
-                decoded_fail += 1
-                tex_global_idx += 1
-                continue
+            # Unique texture — submit PNG save to thread pool (I/O in background).
+            # Pass rgba directly; after this point the main loop creates a new
+            # rgba for the next texture, so the worker gets exclusive use of this one.
+            rel_png = os.path.relpath(out_path, output_dir)
+            _png_futures.append(
+                _png_pool.submit(save_texture_as_png, rgba, out_path, fmt)
+            )
 
             if args.dump_raw and pixel_data:
                 save_raw_data(pixel_data, out_path)
@@ -435,7 +641,6 @@ def cmd_extract(args, progress_callback=None):
             if qm["is_suspicious"]:
                 suspicious_count += 1
 
-            rel_png = os.path.relpath(out_path, output_dir)
             rec = make_texture_record(
                 tex_id=tex_id,
                 source_rom=rom_basename,
@@ -457,9 +662,33 @@ def cmd_extract(args, progress_callback=None):
             )
             rec["content_hash"] = content_hash
             if _HAS_XXHASH and pixel_data:
-                rec["raw_data_hash_xxh64"] = _xxhash.xxh64(pixel_data).hexdigest().upper()
+                if raw_hash_key is None:
+                    raw_hash_key = _xxhash.xxh64(pixel_data).hexdigest().upper()
+                rec["raw_data_hash_xxh64"] = raw_hash_key
+                # Register for future raw-hash dedup (first saved occurrence)
+                if dedup_active and raw_hash_key not in seen_raw_hashes:
+                    seen_raw_hashes[raw_hash_key] = (tex_id, content_hash)
             records.append(rec)
             tex_global_idx += 1
+          except Exception as _tex_exc:
+            logger.warning(f"Texture decode error in {file_path}: {_tex_exc}")
+            failures.append({
+                "id": f"tex_{tex_global_idx:04d}",
+                "source_file_path": file_path,
+                "reason": str(_tex_exc),
+                "parser_used": tex_info.get("parser_used", "unknown") if tex_info else "unknown",
+            })
+            decoded_fail += 1
+            tex_global_idx += 1
+
+    # Wait for all background PNG saves to complete, collect any failures.
+    for future in _png_futures:
+        try:
+            if not future.result():
+                decoded_fail += 1
+        except Exception:
+            decoded_fail += 1
+    _png_pool.shutdown(wait=False)
 
     # --- Write outputs ---
     game_title = product_code or title_id
@@ -510,6 +739,39 @@ def cmd_extract(args, progress_callback=None):
         "dedup_mode": dedup_active,
     }
     write_summary(output_dir, summary)
+
+    # --report: write machine-readable report.json
+    if getattr(args, 'report', False):
+        parser_breakdown: Dict[str, int] = {}
+        format_breakdown: Dict[str, int] = {}
+        for r in records:
+            p = r.get("parser_used", "unknown")
+            parser_breakdown[p] = parser_breakdown.get(p, 0) + 1
+            f = r.get("detected_format", "?")
+            format_breakdown[f] = format_breakdown.get(f, 0) + 1
+        report_data = {
+            "tool_version": "1.1-beta",
+            "rom_filename": rom_basename,
+            "rom_size_mb": round(os.path.getsize(args.input) / (1024 * 1024), 2),
+            "title_id": title_id,
+            "product_code": product_code,
+            "extraction_time_seconds": round(elapsed, 2),
+            "romfs_files": len(files),
+            "files_scanned": files_scanned,
+            "textures_total": decoded_ok,
+            "textures_unique": textures_unique,
+            "textures_failed": decoded_fail,
+            "textures_suspicious": suspicious_count,
+            "duplicate_pct": dup_pct,
+            "parser_breakdown": parser_breakdown,
+            "format_breakdown": format_breakdown,
+            "errors": [{"file": f["source_file_path"], "reason": f["reason"]}
+                       for f in failures],
+        }
+        report_path = os.path.join(output_dir, "report.json")
+        with open(report_path, "w", encoding="utf-8") as _rf:
+            json.dump(report_data, _rf, indent=2)
+        logger.info(f"Wrote report.json")
 
     # CLI output
     if dedup_active:
@@ -812,6 +1074,8 @@ def build_parser():
     p_ext.add_argument("--list-files", action="store_true")
     p_ext.add_argument("--dedup", action="store_true",
                        help="Skip writing duplicate textures (keep first copy only)")
+    p_ext.add_argument("--report", action="store_true",
+                       help="Write a machine-readable report.json to the output directory")
     p_ext.add_argument("--verbose", action="store_true")
     p_ext.add_argument("--quiet", action="store_true")
 
@@ -868,8 +1132,18 @@ def main():
         try:
             handler(args)
         except EncryptedROMError as e:
-            logger.error(str(e))
-            sys.exit(1)
+            print(f"\n{'='*56}", file=sys.stderr)
+            print(f"  ERROR: Encrypted ROM", file=sys.stderr)
+            print(f"{'='*56}", file=sys.stderr)
+            print(f"  This ROM is encrypted and cannot be extracted.", file=sys.stderr)
+            print(f"  Decrypt it first using GodMode9 on your 3DS:", file=sys.stderr)
+            print(f"", file=sys.stderr)
+            print(f"    GodMode9 > [A] on game > Manage Title... > Decrypt File (SysNAND)", file=sys.stderr)
+            print(f"    or: NCSD image options... > Decrypt image (0)", file=sys.stderr)
+            print(f"", file=sys.stderr)
+            print(f"  Guide: https://3ds.hacks.guide/godmode9-usage.html", file=sys.stderr)
+            print(f"{'='*56}\n", file=sys.stderr)
+            sys.exit(2)
         except ROMParseError as e:
             logger.error(str(e))
             sys.exit(1)

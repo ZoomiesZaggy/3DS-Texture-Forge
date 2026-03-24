@@ -23,6 +23,7 @@ from textures.ctxb import is_ctxb, parse_ctxb
 from textures.cmb import is_cmb, extract_cmb_textures
 from textures.tex_capcom import is_capcom_tex, parse_capcom_tex_strict
 from textures.shinen_tex import is_shinen_tex, parse_shinen_tex
+from textures.gdb1 import is_gdb1
 from parsers.sarc import is_sarc, parse_sarc
 from parsers.garc import is_garc, parse_garc, parse_garc_iter, garc_has_cgfx
 from parsers.narc import is_narc, parse_narc
@@ -31,8 +32,33 @@ from parsers.gar import is_gar, parse_gar
 from parsers.darc import is_darc, parse_darc
 from parsers.arc_capcom import is_capcom_arc, parse_capcom_arc
 from parsers.arc_fe import is_fe_arc, parse_fe_arc
-from parsers.lz import is_lz_compressed, decompress_lz
+from parsers.lz import is_lz_compressed, decompress_lz, is_blz_compressed, decompress_blz
+from parsers.cpk import is_cpk, iter_cpk_textures
+from parsers.arc0 import is_arc0, iter_arc0_textures
+from textures.jimg import is_jimg, parse_jimg
 import numpy as np
+import os
+
+# Persistent process pool for parallel LZ decompression in large GARCs.
+# Lazily created on first use; uses min(cpu_count, 16) workers.
+_LZ_POOL = None
+_LZ_POOL_WORKERS = 0
+
+def _get_lz_pool():
+    """Return (or create) the shared LZ decompression process pool."""
+    global _LZ_POOL, _LZ_POOL_WORKERS
+    if _LZ_POOL is None:
+        try:
+            from concurrent.futures import ProcessPoolExecutor
+            workers = min(max(os.cpu_count() or 1, 1), 16)
+            _LZ_POOL = ProcessPoolExecutor(max_workers=workers)
+            _LZ_POOL_WORKERS = workers
+        except Exception:
+            _LZ_POOL = None
+    return _LZ_POOL
+
+# Minimum number of entries before we bother with parallel decompression.
+_PARALLEL_GARC_THRESHOLD = 200
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +160,9 @@ class FileFingerprint:
         elif is_fe_arc(data):
             self.detected_type = "fe_arc"
             self.confidence = "high"
+        elif is_blz_compressed(data):
+            self.detected_type = "blz"
+            self.confidence = "high"
         elif is_ctxb(data):
             self.detected_type = "ctxb"
             self.confidence = "high"
@@ -185,6 +214,21 @@ class FileFingerprint:
         elif self.ext == ".cmb":
             self.detected_type = "cmb"
             self.confidence = "medium"
+        elif is_gdb1(data) or self.ext == ".texturegdb":
+            self.detected_type = "gdb1"
+            self.confidence = "high" if is_gdb1(data) else "medium"
+        elif is_jimg(data):
+            self.detected_type = "jimg"
+            self.confidence = "high"
+        elif is_cpk(data):
+            self.detected_type = "cpk"
+            self.confidence = "high"
+        elif is_arc0(data):
+            self.detected_type = "arc0"
+            self.confidence = "high"
+        elif self.ext == ".fa":
+            self.detected_type = "arc0"
+            self.confidence = "medium"
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -227,6 +271,8 @@ def extract_textures_with_confidence(
         textures = _extract_yaz0(data, file_path, scan_all=scan_all, title_id=title_id)
     elif fp.detected_type == "nintendo_lz":
         textures = _extract_nintendo_lz(data, file_path, scan_all=scan_all, title_id=title_id)
+    elif fp.detected_type == "blz":
+        textures = _extract_blz(data, file_path, scan_all=scan_all, title_id=title_id)
     elif fp.detected_type == "garc":
         textures = _extract_garc(data, file_path, scan_all=scan_all, title_id=title_id)
     elif fp.detected_type == "zar":
@@ -259,6 +305,12 @@ def extract_textures_with_confidence(
         textures = _extract_shinen_tex(data, file_path)
     elif fp.detected_type == "capcom_tex":
         textures = _extract_capcom(data, file_path, title_id=title_id)
+    elif fp.detected_type == "jimg":
+        textures = parse_jimg(data, file_path)
+    elif fp.detected_type == "cpk":
+        textures = _extract_cpk(data, file_path, scan_all=scan_all, title_id=title_id)
+    elif fp.detected_type == "arc0":
+        textures = _extract_arc0(data, file_path, scan_all=scan_all, title_id=title_id)
 
     if textures:
         return textures, fp
@@ -305,11 +357,10 @@ def _extract_garc(data: bytes, file_path: str,
                    title_id: str = "") -> List[Dict[str, Any]]:
     """Extract textures from inner files within a GARC archive.
 
-    Uses streaming iteration to handle large GARCs (1GB+) without
-    loading all inner files into memory at once. Processes:
-      - Direct texture containers (CGFX, BCH, CTPK, BFLIM)
-      - LZ-compressed entries (decompress, then check for textures)
-      - Pokemon wrapper formats (PC, PT, GR → unwrap to inner BCH)
+    For large GARCs with many LZ-compressed .bin entries (e.g. Pokemon X/Y
+    model archives), LZ decompression is batched across a process pool for
+    a significant speedup.  Direct texture containers (CGFX, BCH, CTPK,
+    BFLIM) are always processed sequentially as they are fast.
     """
     if not is_garc(data):
         return []
@@ -319,68 +370,90 @@ def _extract_garc(data: bytes, file_path: str,
     # parser produces massive false positives on 3D model data.
     has_cgfx = garc_has_cgfx(data)
 
-    textures = []
-    processed = 0
+    # Pass 1: collect all entries; separate direct containers from .bin blobs.
+    direct_entries: List[Tuple[str, bytes]] = []   # (name, data) — ready to parse
+    bin_compressed: List[Tuple[str, bytes]] = []   # (name, compressed_data)
+    bin_plain: List[Tuple[str, bytes]] = []        # (name, uncompressed_bin_data)
+
     for inner_name, inner_data in parse_garc_iter(data):
         if len(inner_data) < 8:
             continue
-
         ext = inner_name.rsplit('.', 1)[-1].lower() if '.' in inner_name else ''
-
-        # Direct texture container formats
         if ext in ('cgfx', 'bch', 'ctpk', 'bflim', 'sarc'):
-            if ext == 'bch' and has_cgfx:
-                continue
-            inner_path = f"{file_path}>{inner_name}"
-            inner_textures, _ = extract_textures_with_confidence(
-                inner_data, inner_path, scan_all=False, title_id=title_id,
-            )
-            for tex in inner_textures:
-                tex["source_file"] = inner_path
-                tex["garc_parent"] = file_path
-            textures.extend(inner_textures)
-            processed += 1
-
+            direct_entries.append((inner_name, inner_data))
         elif ext == 'bin':
-            # Try LZ decompression for .bin files (common in Pokemon GARCs)
-            work = inner_data
-            is_compressed = False
             if inner_data[0] in (0x10, 0x11) and len(inner_data) > 16:
-                try:
-                    dec = decompress_lz(inner_data)
-                    if dec and len(dec) >= 8:
-                        work = dec
-                        is_compressed = True
-                except Exception:
-                    continue
+                bin_compressed.append((inner_name, inner_data))
+            else:
+                bin_plain.append((inner_name, inner_data))
+        # (other extensions are silently skipped — no textures expected)
 
-            # Check for Pokemon wrapper formats (PC/PT/GR → BCH inside)
-            unwrapped = _unwrap_pokemon_container(work)
-            if unwrapped is not None:
-                suffix = "[lz]" if is_compressed else ""
-                inner_path = f"{file_path}>{inner_name}{suffix}[unwrap]"
-                inner_textures, _ = extract_textures_with_confidence(
-                    unwrapped, inner_path, scan_all=False, title_id=title_id,
-                )
-                for tex in inner_textures:
-                    tex["source_file"] = inner_path
-                    tex["garc_parent"] = file_path
-                textures.extend(inner_textures)
-                processed += 1
-            elif work[:4] in (b'BCH\x00', b'CGFX', b'CTPK'):
-                # LZ-compressed texture container (no wrapper)
-                suffix = "[lz]" if is_compressed else ""
-                inner_path = f"{file_path}>{inner_name}{suffix}"
-                inner_textures, _ = extract_textures_with_confidence(
-                    work, inner_path, scan_all=False, title_id=title_id,
-                )
-                for tex in inner_textures:
-                    tex["source_file"] = inner_path
-                    tex["garc_parent"] = file_path
-                textures.extend(inner_textures)
-                processed += 1
+    # Pass 2: decompress .bin entries — parallel for large batches.
+    if bin_compressed:
+        compressed_blobs = [d for _, d in bin_compressed]
+        if len(bin_compressed) >= _PARALLEL_GARC_THRESHOLD:
+            pool = _get_lz_pool()
+        else:
+            pool = None
 
-        # Progress indicator for large GARCs
+        if pool is not None:
+            try:
+                decompressed = list(pool.map(decompress_lz, compressed_blobs, chunksize=25))
+            except Exception:
+                decompressed = [decompress_lz(d) for d in compressed_blobs]
+        else:
+            decompressed = [decompress_lz(d) for d in compressed_blobs]
+
+        bin_decompressed: List[Tuple[str, bytes, bool]] = [
+            (name, dec, True)
+            for (name, _), dec in zip(bin_compressed, decompressed)
+            if dec and len(dec) >= 8
+        ]
+    else:
+        bin_decompressed = []
+
+    # Also include plain .bin entries (already decompressed / not LZ).
+    bin_all = bin_decompressed + [(name, d, False) for name, d in bin_plain if len(d) >= 8]
+
+    # Pass 3: extract textures from all entries.
+    textures = []
+    processed = 0
+
+    for inner_name, inner_data in direct_entries:
+        ext = inner_name.rsplit('.', 1)[-1].lower() if '.' in inner_name else ''
+        if ext == 'bch' and has_cgfx:
+            continue
+        inner_path = f"{file_path}>{inner_name}"
+        inner_textures, _ = extract_textures_with_confidence(
+            inner_data, inner_path, scan_all=False, title_id=title_id,
+        )
+        for tex in inner_textures:
+            tex["source_file"] = inner_path
+            tex["garc_parent"] = file_path
+        textures.extend(inner_textures)
+        processed += 1
+
+    for inner_name, work, is_compressed in bin_all:
+        suffix = "[lz]" if is_compressed else ""
+        unwrapped = _unwrap_pokemon_container(work)
+        if unwrapped is not None:
+            inner_path = f"{file_path}>{inner_name}{suffix}[unwrap]"
+            inner_textures, _ = extract_textures_with_confidence(
+                unwrapped, inner_path, scan_all=False, title_id=title_id,
+            )
+        elif work[:4] in (b'BCH\x00', b'CGFX', b'CTPK'):
+            inner_path = f"{file_path}>{inner_name}{suffix}"
+            inner_textures, _ = extract_textures_with_confidence(
+                work, inner_path, scan_all=False, title_id=title_id,
+            )
+        else:
+            continue
+        for tex in inner_textures:
+            tex["source_file"] = inner_path
+            tex["garc_parent"] = file_path
+        textures.extend(inner_textures)
+        processed += 1
+
         if processed > 0 and processed % 500 == 0:
             logger.info(f"GARC {file_path}: processed {processed} files, {len(textures)} textures so far...")
 
@@ -405,13 +478,39 @@ def _extract_yaz0(data: bytes, file_path: str,
     return textures
 
 
+_KNOWN_TEXTURE_MAGIC = frozenset({
+    b'BCH\x00', b'CGFX', b'CTPK', b'SARC', b'NARC', b'darc',
+    b'Yaz0', b'ZAR\x01', b'GAR\x02', b'ARC\x00', b'TEX\x00',
+    b'ctxb', b'jIMG', b'CPK ', b'ARC0',
+})
+_BFLIM_FOOTER_MAGICS = (b'FLIM', b'CLIM')
+
+
 def _extract_nintendo_lz(data: bytes, file_path: str,
                           scan_all: bool = False,
                           title_id: str = "") -> List[Dict[str, Any]]:
-    """Decompress Nintendo LZ data and extract textures from the inner content."""
+    """Decompress Nintendo LZ data and extract textures from the inner content.
+
+    After decompression, check whether the result looks like a texture container
+    before running the full extractor.  This prevents wasting time on the 6,000+
+    non-texture .cmp files found in games like Stella Glow.
+    """
     decompressed = decompress_lz(data)
     if decompressed is None:
         return []
+
+    # Fast reject: skip if decompressed data has no recognisable texture magic.
+    has_texture = False
+    if len(decompressed) >= 4:
+        if decompressed[:4] in _KNOWN_TEXTURE_MAGIC:
+            has_texture = True
+        elif len(decompressed) >= 0x28:
+            # BFLIM/BCLIM store their magic in a footer
+            if decompressed[-0x28:-0x24] in _BFLIM_FOOTER_MAGICS:
+                has_texture = True
+    if not has_texture:
+        return []
+
     logger.info(f"LZ {file_path}: {len(data):,} -> {len(decompressed):,} bytes")
     # Strip .lz/.cmp extension to reveal inner filename for better classification
     inner_path = file_path
@@ -419,10 +518,87 @@ def _extract_nintendo_lz(data: bytes, file_path: str,
     if lower.endswith('.lz') or lower.endswith('.cmp'):
         inner_path = file_path[:-len('.lz')] if lower.endswith('.lz') else file_path[:-len('.cmp')]
     inner_path = f"{inner_path}[decompressed]"
-    # Recursively extract from the decompressed content
     textures, _ = extract_textures_with_confidence(
         decompressed, inner_path, scan_all=scan_all, title_id=title_id,
     )
+    return textures
+
+
+def _extract_blz(data: bytes, file_path: str,
+                  scan_all: bool = False,
+                  title_id: str = "") -> List[Dict[str, Any]]:
+    """Decompress BLZ (backward LZSS) data and extract textures from the result."""
+    decompressed = decompress_blz(data)
+    if decompressed is None:
+        return []
+
+    # Fast reject: skip if decompressed data has no recognisable texture magic.
+    has_texture = False
+    if len(decompressed) >= 4:
+        if decompressed[:4] in _KNOWN_TEXTURE_MAGIC:
+            has_texture = True
+        elif len(decompressed) >= 0x28:
+            if decompressed[-0x28:-0x24] in _BFLIM_FOOTER_MAGICS:
+                has_texture = True
+    if not has_texture:
+        return []
+
+    logger.info(f"BLZ {file_path}: {len(data):,} -> {len(decompressed):,} bytes")
+    inner_path = f"{file_path}[blz_decompressed]"
+    textures, _ = extract_textures_with_confidence(
+        decompressed, inner_path, scan_all=scan_all, title_id=title_id,
+    )
+    return textures
+
+
+def _extract_cpk(data: bytes, file_path: str,
+                  scan_all: bool = False,
+                  title_id: str = "") -> List[Dict[str, Any]]:
+    """Extract textures from all files inside a CRI CPK archive."""
+    textures = []
+    count = 0
+    for inner_path, inner_data in iter_cpk_textures(data):
+        if len(inner_data) < 8:
+            continue
+        inner_tex, _ = extract_textures_with_confidence(
+            inner_data, f"{file_path}>{inner_path}",
+            scan_all=False, title_id=title_id,
+        )
+        for tex in inner_tex:
+            tex["source_file"] = f"{file_path}>{inner_path}"
+            tex["cpk_parent"] = file_path
+        textures.extend(inner_tex)
+        count += 1
+        if count % 500 == 0:
+            logger.info(f"CPK {file_path}: processed {count} entries, {len(textures)} textures")
+    if textures:
+        logger.info(f"CPK {file_path}: {count} entries, {len(textures)} textures")
+    return textures
+
+
+def _extract_arc0(data: bytes, file_path: str,
+                   scan_all: bool = False,
+                   title_id: str = "") -> List[Dict[str, Any]]:
+    """Extract textures from standard-format blobs inside a Level-5 ARC0 archive."""
+    textures = []
+    count = 0
+    try:
+        for inner_path, inner_data in iter_arc0_textures(data):
+            if len(inner_data) < 8:
+                continue
+            inner_tex, _ = extract_textures_with_confidence(
+                inner_data, f"{file_path}>{inner_path}",
+                scan_all=False, title_id=title_id,
+            )
+            for tex in inner_tex:
+                tex["source_file"] = f"{file_path}>{inner_path}"
+                tex["arc0_parent"] = file_path
+            textures.extend(inner_tex)
+            count += 1
+    except Exception as e:
+        logger.debug(f"ARC0 {file_path}: error during extraction: {e}")
+    if textures:
+        logger.info(f"ARC0 {file_path}: {count} blobs, {len(textures)} textures")
     return textures
 
 
@@ -720,6 +896,32 @@ def _extract_capcom(data: bytes, file_path: str,
     return []
 
 
+_MAX_EMBEDDED_SLICE = 4 * 1024 * 1024  # 4 MB cap for false positives / CTPK
+
+
+def _bch_slice_end(data: bytes, idx: int) -> int:
+    """Estimate how many bytes past idx we need to capture a BCH file.
+
+    Key insight: texture pixel data in a BCH file lives at data_addr (header+0x14)
+    relative to the BCH start.  Passing at least data_addr + padding bytes to the
+    extractor is sufficient to find all textures.
+
+    - If data_addr is within the remaining bytes → almost certainly a real BCH
+      (or a position inside a BG4 container where data_addr correctly identifies
+      where pixel data is stored):
+        slice = data_addr + 8 MB padding
+    - Otherwise → coincidental BCH\x00 bytes with no valid data section:
+        512 KB cap for fast rejection by the extractor.
+    """
+    remaining = len(data) - idx
+    if remaining < 0x20:
+        return remaining
+    data_addr = struct.unpack_from("<I", data, idx + 0x14)[0]
+    if 0 < data_addr < remaining:
+        return min(data_addr + 8 * 1024 * 1024, remaining)
+    return min(remaining, 512 * 1024)
+
+
 def _scan_for_embedded_containers(data: bytes, file_path: str) -> List[Dict[str, Any]]:
     """Scan for known magic bytes embedded within a larger file."""
     textures = []
@@ -736,8 +938,13 @@ def _scan_for_embedded_containers(data: bytes, file_path: str) -> List[Dict[str,
             idx = data.find(magic, offset)
             if idx < 0:
                 break
+            remaining = len(data) - idx
+            if magic == b"BCH\x00":
+                est_end = _bch_slice_end(data, idx)
+            else:
+                est_end = min(remaining, _MAX_EMBEDDED_SLICE)
             try:
-                sub = data[idx:]
+                sub = data[idx:idx + est_end]
                 results = extractor(sub, file_path)
                 for r in results:
                     r["sub_offset"] = idx

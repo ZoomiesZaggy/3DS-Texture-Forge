@@ -13,6 +13,12 @@ import struct
 from typing import List, Dict, Any, Optional, Tuple
 from utils import read_u32_le, read_u16_le, read_u8
 
+try:
+    import numpy as _np
+    _HAS_NUMPY = True
+except ImportError:
+    _HAS_NUMPY = False
+
 logger = logging.getLogger(__name__)
 
 # PICA200 GPU texture registers (from 3dbrew.org/wiki/GPU/Internal_Registers)
@@ -593,6 +599,66 @@ def extract_bch_textures(data: bytes) -> List[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 # Heuristic Scanner (legacy fallback)
 # ---------------------------------------------------------------------------
+def _scan_section_numpy(data: bytes, section_offset: int, section_count: int,
+                        entry_size: int, content_data_off: int,
+                        start_tex_idx: int, file_len: int):
+    """Numpy-vectorized scan of all entries in a BCH section.
+
+    Processes all section_count entries at once using numpy, replicating the
+    _heuristic_entry_scan heuristic (last match wins).  Returns (textures, tex_idx).
+    """
+    n_words = entry_size // 4
+    n_entries = min(section_count, (file_len - section_offset) // entry_size)
+    if n_entries <= 0:
+        return [], start_tex_idx
+
+    mat = _np.frombuffer(data, dtype='<u4',
+                         offset=section_offset,
+                         count=n_entries * n_words).reshape(n_entries, n_words)
+
+    # Valid texture dimension: power-of-2, in [4, 2048]
+    valid_dim = (mat >= 4) & (mat <= 2048) & ((mat & (mat - 1)) == 0)
+
+    # Track best match per entry (last-wins matches original loop order)
+    has_match = _np.zeros(n_entries, dtype=bool)
+    best_w   = _np.zeros(n_entries, dtype=_np.uint32)
+    best_h   = _np.zeros(n_entries, dtype=_np.uint32)
+    best_fmt = _np.zeros(n_entries, dtype=_np.uint32)
+
+    # j: word index for val1/val2 pair; range(0, entry_size-8, 4) → j in 0..n_words-3
+    for j in range(n_words - 2):
+        pair_mask = valid_dim[:, j] & valid_dim[:, j + 1]
+        if not _np.any(pair_mask):
+            continue
+        # fmt_off in range(-8, entry_size - j*4, 4) → fj in range(max(0,j-2), n_words)
+        for fj in range(max(0, j - 2), n_words):
+            fmt_mask = mat[:, fj] <= 0xD
+            match = pair_mask & fmt_mask
+            if not _np.any(match):
+                continue
+            has_match |= match
+            best_w   = _np.where(match, mat[:, j + 1], best_w)
+            best_h   = _np.where(match, mat[:, j],     best_h)
+            best_fmt = _np.where(match, mat[:, fj],    best_fmt)
+
+    textures = []
+    tex_idx = start_tex_idx
+    for i in _np.where(has_match)[0]:
+        textures.append({
+            'index':       tex_idx,
+            'width':       int(best_w[i]),
+            'height':      int(best_h[i]),
+            'format':      int(best_fmt[i]),
+            'data_offset': content_data_off,
+            'data_size':   0,
+            'mip_count':   1,
+            'name':        f'bch_tex_{tex_idx:04d}',
+        })
+        tex_idx += 1
+
+    return textures, tex_idx
+
+
 def _heuristic_scan(data: bytes) -> List[Dict[str, Any]]:
     """Legacy heuristic: scan binary data for texture-like patterns.
 
@@ -638,24 +704,35 @@ def _heuristic_scan(data: bytes) -> List[Dict[str, Any]]:
         if section_offset >= file_len:
             continue
 
-        # Try different entry sizes (replicating original accumulation behavior)
+        # Try different entry sizes (replicating original accumulation behavior).
+        # Use numpy to process all entries at once — no early-stop needed,
+        # avoiding the texture count regression caused by capping at 20 entries.
         threshold_met = False
         for entry_size in [24, 16, 32, 20]:
-            found = 0
-            for i in range(section_count):
-                entry_off = section_offset + i * entry_size
-                if entry_off + entry_size > file_len:
-                    break
-
-                # Look for dimension pairs in this entry
-                tex_info = _heuristic_entry_scan(
-                    data, entry_off, entry_size, content_data_off)
-                if tex_info:
-                    tex_info['index'] = tex_idx
-                    tex_info['name'] = f'bch_tex_{tex_idx:04d}'
-                    textures.append(tex_info)
-                    tex_idx += 1
-                    found += 1
+            if _HAS_NUMPY:
+                new_textures, tex_idx = _scan_section_numpy(
+                    data, section_offset, section_count, entry_size,
+                    content_data_off, tex_idx, file_len)
+                found = len(new_textures)
+                textures.extend(new_textures)
+            else:
+                # Python fallback: early-stop to bound worst-case cost
+                EARLY_STOP_PROBE = 20
+                found = 0
+                for i in range(section_count):
+                    entry_off = section_offset + i * entry_size
+                    if entry_off + entry_size > file_len:
+                        break
+                    tex_info = _heuristic_entry_scan(
+                        data, entry_off, entry_size, content_data_off)
+                    if tex_info:
+                        tex_info['index'] = tex_idx
+                        tex_info['name'] = f'bch_tex_{tex_idx:04d}'
+                        textures.append(tex_info)
+                        tex_idx += 1
+                        found += 1
+                    elif i == EARLY_STOP_PROBE - 1 and found == 0:
+                        break
 
             if found >= section_count // 2 and found > 0:
                 threshold_met = True
@@ -672,7 +749,25 @@ def _heuristic_scan(data: bytes) -> List[Dict[str, Any]]:
     # Original ran Method 2 only when tex_idx == 0 (Method 1 found nothing).
     # We always run it to maximize coverage.
     if True:
-        for offset in range(0, file_len - 16, 4):
+        # Use numpy to vectorize candidate pre-filtering (valid dimension pairs).
+        # Valid dims: power-of-2 in [8, 2048]. Only ~0.1% of positions pass,
+        # so the inner Python loop runs on a tiny fraction of all positions.
+        if _HAS_NUMPY and file_len >= 20:
+            n_words = file_len // 4
+            u32 = _np.frombuffer(data, dtype='<u4', count=n_words)
+            # _is_valid_dimension vectorized: pow2, in [8, 2048]
+            v = u32.astype(_np.uint32)
+            valid = (v >= 8) & (v <= 2048) & ((v & (v - 1)) == 0)
+            # Pairs: both u32[i] and u32[i+1] must be valid dims (w, h adjacent)
+            pair_valid = valid[:-1] & valid[1:]
+            candidate_word_indices = _np.where(pair_valid)[0]
+            # Convert to byte offsets and filter out-of-bounds
+            candidate_offsets = [int(ci) * 4 for ci in candidate_word_indices
+                                  if int(ci) * 4 + 16 <= file_len and u32[ci] >= 8 and u32[ci+1] >= 8]
+        else:
+            candidate_offsets = range(0, file_len - 16, 4)
+
+        for offset in candidate_offsets:
             w = read_u32_le(data, offset)
             h = read_u32_le(data, offset + 4)
 

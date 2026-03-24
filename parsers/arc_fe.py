@@ -67,9 +67,16 @@ def parse_fe_arc(data: bytes):
         dec = decompress_lz(data[entry_off:])
         if dec is None:
             continue
-        if dec[:4] == b'CTPK':
+        magic4 = dec[:4]
+        if magic4 == b'CTPK':
             yield (idx, f'fe_arc_ctpk_{idx:04d}.ctpk', dec)
+            idx += 1
+        elif magic4 == b'CGFX':
+            yield (idx, f'fe_arc_cgfx_{idx:04d}.cgfx', dec)
+            idx += 1
+        elif magic4 == b'BCH\x00':
+            yield (idx, f'fe_arc_bch_{idx:04d}.bch', dec)
             idx += 1
 
     if idx > 0:
-        logger.debug(f"FE ARC: extracted {idx} CTPK files")
+        logger.debug(f"FE ARC: extracted {idx} texture files")

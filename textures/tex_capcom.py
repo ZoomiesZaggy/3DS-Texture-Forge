@@ -88,6 +88,44 @@ GAME_PROFILES: Dict[str, Dict[str, Any]] = {
         "format_byte_offset": 0x0D,
         "notes": "Same engine as EUR, assumed same mapping.",
     },
+    # Resident Evil: The Mercenaries 3D (same MT Framework Mobile engine as RE:R)
+    "0004000000035900": {
+        "name": "RE Mercenaries 3D (USA)",
+        "format_map": {
+            0x0B: 0x01,
+            0x0C: 0x0D,
+            0x11: 0x0C,
+        },
+        "header_offsets": [0x14, 0x10, 0x18, 0x20],
+        "format_byte_offset": 0x0D,
+        "notes": "Same MT Framework Mobile engine as RE Revelations.",
+    },
+    # Monster Hunter 3 Ultimate (same MT Framework Mobile engine, ARC v0x10)
+    "00040000000AE400": {
+        "name": "MH3 Ultimate (USA)",
+        "format_map": {
+            0x0C: 0x0C,
+            0x0D: 0x0D,
+            0x0B: 0x0C,
+            0x11: 0x0C,
+        },
+        "header_offsets": [0x14, 0x10, 0x18, 0x20],
+        "format_byte_offset": 0x0D,
+        "notes": "Same engine as MH4U, ARC version 0x10.",
+    },
+    # Monster Hunter Generations (same engine, ARC v0x11)
+    "0004000000187000": {
+        "name": "MH Generations (USA)",
+        "format_map": {
+            0x0C: 0x0C,
+            0x0D: 0x0D,
+            0x0B: 0x0C,
+            0x11: 0x0C,
+        },
+        "header_offsets": [0x14, 0x10, 0x18, 0x20],
+        "format_byte_offset": 0x0D,
+        "notes": "Same engine as MH4U, ARC version 0x11.",
+    },
     # Monster Hunter 4 Ultimate (MT Framework Mobile, same header variant as RE:R)
     # Format byte at 0x0D; 0x0C = ETC1 (4bpp) — confirmed: 32768-byte mip0 -> 256x256 ETC1.
     # Default CAPCOM_FORMAT_MAP maps 0x0C -> ETC1A4 (8bpp) which is wrong for MH4U.

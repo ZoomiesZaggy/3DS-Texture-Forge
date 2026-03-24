@@ -69,7 +69,7 @@ class SignalLogHandler(logging.Handler):
 
 class ExtractWorker(QThread):
     finished = Signal(dict)
-    progress = Signal(int, int, str)
+    progress = Signal(int, int, str, int)
     log_message = Signal(str)
     phase_changed = Signal(str)
 
@@ -79,8 +79,8 @@ class ExtractWorker(QThread):
         self.output_dir = output_dir
         self.options = options
 
-    def _on_progress(self, current, total, file_path, fmt_name, w, h):
-        self.progress.emit(current, total, file_path)
+    def _on_progress(self, current, total, file_path, fmt_name, tex_count, h):
+        self.progress.emit(current, total, file_path, tex_count)
 
     def run(self):
         self.phase_changed.emit("Loading ROM...")
@@ -721,6 +721,14 @@ class MainWindow(QMainWindow):
         btn_row.addStretch()
         results_layout.addLayout(btn_row)
 
+        # Contact sheet preview
+        self.lbl_contact_sheet = QLabel()
+        self.lbl_contact_sheet.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        self.lbl_contact_sheet.setStyleSheet("border: none; padding: 0px;")
+        self.lbl_contact_sheet.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.lbl_contact_sheet.setVisible(False)
+        results_layout.addWidget(self.lbl_contact_sheet)
+
         # Thumbnail area
         self.thumb_scroll = QScrollArea()
         self.thumb_scroll.setWidgetResizable(True)
@@ -979,12 +987,13 @@ class MainWindow(QMainWindow):
     def _on_phase_changed(self, phase_text: str):
         self.lbl_progress_text.setText(phase_text)
 
-    def _on_extract_progress(self, current: int, total: int, file_path: str):
+    def _on_extract_progress(self, current: int, total: int, file_path: str, tex_count: int):
         if total > 0:
             self.progress_bar.setRange(0, total)
             self.progress_bar.setValue(current)
+            tex_str = f" | {tex_count:,} textures" if tex_count > 0 else ""
             self.lbl_progress_text.setText(
-                f"Extracting textures ({current}/{total})..."
+                f"Extracting textures ({current}/{total}{tex_str})..."
             )
 
     def _on_extract_finished(self, result: dict):
@@ -1041,6 +1050,25 @@ class MainWindow(QMainWindow):
             # Check manifest
             manifest_path = os.path.join(self._result_output_dir, "manifest.json")
             self.btn_manifest.setVisible(os.path.isfile(manifest_path))
+
+            # Contact sheet preview
+            cs_path = s.get("contact_sheet", "")
+            if cs_path and os.path.isfile(cs_path):
+                cs_pixmap = QPixmap(cs_path)
+                if not cs_pixmap.isNull():
+                    max_w = 760
+                    if cs_pixmap.width() > max_w:
+                        cs_pixmap = cs_pixmap.scaledToWidth(
+                            max_w, Qt.TransformationMode.SmoothTransformation
+                        )
+                    self.lbl_contact_sheet.setPixmap(cs_pixmap)
+                    self.lbl_contact_sheet.setToolTip("Click to open contact sheet")
+                    self.lbl_contact_sheet.mousePressEvent = (
+                        lambda _ev, p=cs_path: self._open_image(p)
+                    )
+                    self.lbl_contact_sheet.setVisible(True)
+            else:
+                self.lbl_contact_sheet.setVisible(False)
 
             # Load thumbnails
             self._load_thumbnails(self._result_output_dir, decoded)

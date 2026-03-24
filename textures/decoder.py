@@ -5,6 +5,12 @@ import logging
 from typing import Optional
 from textures.etc1 import decode_etc1, decode_etc1a4
 
+try:
+    from textures.decoder_numpy import decode_texture_numpy as _decode_texture_numpy
+    _HAS_NUMPY_DECODER = True
+except Exception:
+    _HAS_NUMPY_DECODER = False
+
 logger = logging.getLogger(__name__)
 
 # Format IDs
@@ -341,6 +347,12 @@ def decode_texture_fast(data: bytes, width: int, height: int, fmt: int) -> Optio
     """
     if width <= 0 or height <= 0:
         return None
+
+    # Try NumPy vectorized decoder first (much faster for width/height >= 4)
+    if _HAS_NUMPY_DECODER and width >= 4 and height >= 4:
+        result = _decode_texture_numpy(data, width, height, fmt)
+        if result is not None:
+            return result
 
     # ETC formats don't use per-pixel morton tiling
     if fmt == FMT_ETC1:

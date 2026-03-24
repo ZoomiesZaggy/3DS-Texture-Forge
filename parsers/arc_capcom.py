@@ -39,26 +39,79 @@ def is_capcom_arc(data: bytes) -> bool:
     return len(data) >= 8 and data[:4] == MAGIC
 
 
+def _detect_arc_layout(data: bytes, eoff: int, idx: int, file_len: int) -> bool:
+    """Detect whether this ARC uses self-fields or prev-entry-fields for csize/deco.
+
+    Returns True for self-fields layout, False for prev-entry layout.
+    Tests: try both, see which produces valid zlib → TEX\x00.
+    """
+    data_offset = struct.unpack_from('<I', data, eoff)[0]
+
+    # Try self-fields
+    self_csize = struct.unpack_from('<I', data, eoff + 0x48)[0]
+    self_info = struct.unpack_from('<I', data, eoff + 0x4C)[0]
+    self_comp = bool(self_info & 0x40000000)
+
+    if self_csize > 0 and data_offset + self_csize <= file_len:
+        try:
+            raw = data[data_offset:data_offset + self_csize]
+            dec = zlib.decompress(raw) if self_comp else raw
+            if dec and dec[:4] == b'TEX\x00':
+                return True
+        except Exception:
+            pass
+
+    # Try prev-entry-fields
+    if idx > 0:
+        prev_eoff = 8 + (idx - 1) * ENTRY_SIZE
+        prev_csize = struct.unpack_from('<I', data, prev_eoff + 0x48)[0]
+        prev_info = struct.unpack_from('<I', data, prev_eoff + 0x4C)[0]
+        prev_comp = bool(prev_info & 0x20000000)
+
+        if prev_csize > 0 and data_offset + prev_csize <= file_len:
+            try:
+                raw = data[data_offset:data_offset + prev_csize]
+                dec = zlib.decompress(raw) if prev_comp else raw
+                if dec and dec[:4] == b'TEX\x00':
+                    return False
+            except Exception:
+                pass
+
+    return True  # default to self-fields
+
+
 def parse_capcom_arc(data: bytes, tex_hash: int = MH4U_TEX_HASH):
     """Parse a Capcom ARC archive, yielding decompressed TEX file data.
 
     Yields (filename, decompressed_data) for each entry whose ext_hash
     matches tex_hash and whose decompressed content starts with 'TEX\x00'.
 
-    The ARC stores size info for entry N in entry N-1's fields:
-      entry[N].csize   = entry[N-1].next_csize
-      entry[N].deco    = entry[N-1].next_info & 0x1FFFFFFF
+    Version 0x13 (MH4U): size info for entry N is in entry N-1's fields.
+      entry[N].csize   = entry[N-1].next_csize  (@0x48)
+      entry[N].deco    = entry[N-1].next_info & 0x1FFFFFFF  (@0x4C)
       entry[N].is_comp = bool(entry[N-1].next_info & 0x20000000)
+
+    Version 0x10/0x11 (MH3U/MHGen): size info is in the entry's OWN fields.
+      entry[N].csize   = entry[N].field_48  (@0x48)
+      entry[N].deco    = entry[N].field_4C & 0x0FFFFFFF  (@0x4C)
+      entry[N].is_comp = bool(entry[N].field_4C & 0x40000000)
     """
     if not is_capcom_arc(data):
         return
 
+    version = struct.unpack_from('<H', data, 4)[0]
     num_entries = struct.unpack_from('<H', data, 6)[0]
     if num_entries == 0 or num_entries > 65535:
         return
 
     file_len = len(data)
     count = 0
+
+    # Auto-detect field layout: try first TEX entry with both approaches.
+    # "self" = csize/deco in own fields, comp bit 0x40000000
+    # "prev" = csize/deco in preceding entry's fields, comp bit 0x20000000
+    # We detect once and apply to all entries in this ARC.
+    use_self = None  # None = not yet detected
 
     for idx in range(num_entries):
         eoff = 8 + idx * ENTRY_SIZE
@@ -70,14 +123,24 @@ def parse_capcom_arc(data: bytes, tex_hash: int = MH4U_TEX_HASH):
             continue
 
         data_offset = struct.unpack_from('<I', data, eoff)[0]
-        if data_offset == 0 or idx == 0:
-            continue  # No in-archive data or no predecessor
+        if data_offset == 0:
+            continue
 
-        # Get csize/deco from the preceding entry's fields
-        prev_eoff = 8 + (idx - 1) * ENTRY_SIZE
-        csize = struct.unpack_from('<I', data, prev_eoff + 0x48)[0]
-        next_info = struct.unpack_from('<I', data, prev_eoff + 0x4C)[0]
-        is_compressed = bool(next_info & 0x20000000)
+        # Auto-detect on first TEX entry
+        if use_self is None and idx > 0:
+            use_self = _detect_arc_layout(data, eoff, idx, file_len)
+
+        if use_self or (use_self is None and idx == 0):
+            csize = struct.unpack_from('<I', data, eoff + 0x48)[0]
+            info = struct.unpack_from('<I', data, eoff + 0x4C)[0]
+            is_compressed = bool(info & 0x40000000)
+        else:
+            if idx == 0:
+                continue
+            prev_eoff = 8 + (idx - 1) * ENTRY_SIZE
+            csize = struct.unpack_from('<I', data, prev_eoff + 0x48)[0]
+            info = struct.unpack_from('<I', data, prev_eoff + 0x4C)[0]
+            is_compressed = bool(info & 0x20000000)
 
         if csize == 0 or data_offset + csize > file_len:
             continue
