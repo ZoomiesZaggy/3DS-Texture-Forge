@@ -426,11 +426,40 @@ def extract_game(rom_name):
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--only-zeros", action="store_true",
+                        help="Re-run only games that previously had zero textures")
+    args = parser.parse_args()
+
     OUT_BASE.mkdir(parents=True, exist_ok=True)
+
+    games_to_run = GAMES
+    if args.only_zeros:
+        # Filter to games whose output directory has no PNGs
+        filtered = []
+        for g in GAMES:
+            game_short = Path(g).stem
+            if len(game_short) > 60:
+                game_short = game_short[:60]
+            game_short = game_short.replace("'", "").replace('"', "").replace("!", "").replace("&", "and")
+            out_dir = OUT_BASE / game_short
+            # Check if it has any textures
+            has_textures = False
+            if out_dir.exists():
+                for root, dirs, files in os.walk(out_dir):
+                    if any(f.endswith('.png') and f != 'contact_sheet.png' for f in files):
+                        has_textures = True
+                        break
+            if not has_textures:
+                filtered.append(g)
+        games_to_run = filtered
+        print(f"--only-zeros: re-running {len(games_to_run)} of {len(GAMES)} games")
+
     start_time = datetime.now()
     print(f"{'=' * 70}")
     print(f"  3DS Texture Forge - Mass Extraction")
-    print(f"  {len(GAMES)} games, {MAX_WORKERS} parallel workers")
+    print(f"  {len(games_to_run)} games, {MAX_WORKERS} parallel workers")
     print(f"  Output: {OUT_BASE}")
     print(f"  Started: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{'=' * 70}")
@@ -440,14 +469,14 @@ def main():
     total_tx = 0
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = {executor.submit(extract_game, g): g for g in GAMES}
+        futures = {executor.submit(extract_game, g): g for g in games_to_run}
         for future in as_completed(futures):
             rom, status, count, quality, note = future.result()
             completed += 1
             total_tx += count
-            pct = completed / len(GAMES) * 100
+            pct = completed / len(games_to_run) * 100
             q_str = f"{quality:.0%}" if quality > 0 else " -- "
-            print(f"[{completed:3d}/{len(GAMES)}] {pct:5.1f}% | {status:9s} | "
+            print(f"[{completed:3d}/{len(games_to_run)}] {pct:5.1f}% | {status:9s} | "
                   f"{count:8,d} tx | Q:{q_str:>4s} | {rom[:55]}")
             results.append({
                 "rom": rom,
@@ -477,7 +506,7 @@ def main():
     lines.append("=" * 70)
     lines.append(f"  Completed:   {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
     lines.append(f"  Duration:    {elapsed_total / 60:.1f} minutes")
-    lines.append(f"  Total games: {len(GAMES)}")
+    lines.append(f"  Total games: {len(games_to_run)}")
     lines.append(f"  Success:     {len(ok)} games")
     lines.append(f"  Zero tx:     {len(zero)} games")
     lines.append(f"  Missing:     {len(missing)} ROMs not found")
