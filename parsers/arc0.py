@@ -37,6 +37,7 @@ _TEXTURE_MAGICS = (
     b'BCH\x00',
     b'CGFX',
     b'CTPK',
+    b'IMGC',
 )
 
 # BFLIM/BCLIM are footer-based so harder to scan for; skip in scan mode.
@@ -124,6 +125,10 @@ def _find_texture_blobs(data: bytes, base_offset: int = 0) -> Iterator[Tuple[str
             elif magic == b'CGFX' and remaining >= 0x10:
                 cgfx_size = struct.unpack_from('<I', data, idx + 0x08)[0]
                 blob_size = min(cgfx_size + 0x100, remaining) if 0 < cgfx_size < remaining else min(remaining, 4 * 1024 * 1024)
+            elif magic == b'IMGC' and remaining >= 0x40:
+                # IMGC: total compressed size at +0x3C, plus 0x48 header
+                imgc_comp = struct.unpack_from('<I', data, idx + 0x3C)[0]
+                blob_size = min(0x48 + imgc_comp + 256, remaining) if 0 < imgc_comp < remaining else min(remaining, 512 * 1024)
             else:
                 blob_size = min(remaining, 4 * 1024 * 1024)
 

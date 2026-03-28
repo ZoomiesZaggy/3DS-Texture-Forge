@@ -38,6 +38,7 @@ from parsers.cpk import is_cpk, iter_cpk_textures
 from parsers.arc0 import is_arc0, iter_arc0_textures
 from textures.jimg import is_jimg, parse_jimg
 from textures.stex import is_stex, parse_stex
+from parsers.level5 import is_imgc, parse_imgc
 import numpy as np
 import os
 
@@ -225,6 +226,9 @@ class FileFingerprint:
         elif is_jimg(data):
             self.detected_type = "jimg"
             self.confidence = "high"
+        elif is_imgc(data):
+            self.detected_type = "imgc"
+            self.confidence = "high"
         elif is_stex(data):
             self.detected_type = "stex"
             self.confidence = "high"
@@ -320,6 +324,8 @@ def extract_textures_with_confidence(
         textures = _extract_capcom(data, file_path, title_id=title_id)
     elif fp.detected_type == "jimg":
         textures = parse_jimg(data, file_path)
+    elif fp.detected_type == "imgc":
+        textures = parse_imgc(data)
     elif fp.detected_type == "stex":
         textures = parse_stex(data)
     elif fp.detected_type == "cpk":
