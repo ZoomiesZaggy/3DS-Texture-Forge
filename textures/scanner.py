@@ -37,6 +37,7 @@ import zlib as _zlib
 from parsers.cpk import is_cpk, iter_cpk_textures
 from parsers.arc0 import is_arc0, iter_arc0_textures
 from textures.jimg import is_jimg, parse_jimg
+from textures.stex import is_stex, parse_stex
 import numpy as np
 import os
 
@@ -134,9 +135,9 @@ class FileFingerprint:
         if is_yaz0(data):
             self.detected_type = "yaz0"
             self.confidence = "high"
-        elif self.ext in (".lz", ".cmp", ".chres", ".chtex", ".zrc") and is_lz_compressed(data, self.path):
+        elif is_lz_compressed(data, self.path):
             self.detected_type = "nintendo_lz"
-            self.confidence = "high"
+            self.confidence = "high" if self.ext in (".lz", ".cmp", ".chres", ".chtex", ".zrc") else "medium"
         elif is_garc(data):
             self.detected_type = "garc"
             self.confidence = "high"
@@ -224,12 +225,18 @@ class FileFingerprint:
         elif is_jimg(data):
             self.detected_type = "jimg"
             self.confidence = "high"
+        elif is_stex(data):
+            self.detected_type = "stex"
+            self.confidence = "high"
         elif is_cpk(data):
             self.detected_type = "cpk"
             self.confidence = "high"
         elif is_arc0(data):
             self.detected_type = "arc0"
             self.confidence = "high"
+        elif self.ext == ".stex":
+            self.detected_type = "stex"
+            self.confidence = "medium"
         elif self.ext == ".fa":
             self.detected_type = "arc0"
             self.confidence = "medium"
@@ -313,6 +320,8 @@ def extract_textures_with_confidence(
         textures = _extract_capcom(data, file_path, title_id=title_id)
     elif fp.detected_type == "jimg":
         textures = parse_jimg(data, file_path)
+    elif fp.detected_type == "stex":
+        textures = parse_stex(data)
     elif fp.detected_type == "cpk":
         textures = _extract_cpk(data, file_path, scan_all=scan_all, title_id=title_id)
     elif fp.detected_type == "arc0":

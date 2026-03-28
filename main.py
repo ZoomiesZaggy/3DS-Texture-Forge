@@ -144,7 +144,7 @@ _PROCESS_EXTENSIONS = {
     ".bcmdl", ".bctex", ".bcmcla", ".szs", ".zar", ".zsi",
     ".bccam", ".bcsdr", ".bcptl", ".bhres", ".bhtex", ".cbres",
     ".lz", ".cmp",
-    ".chres", ".chtex",
+    ".chres", ".chtex", ".stex",
     ".gar", ".lzs",
     ".zrc",
     ".fs",
