@@ -131,6 +131,6 @@ Two Windows builds, no installation required:
 - **`3DS Texture Forge.exe`** (66 MB): GUI, drag-and-drop
 - **`3ds-tex-extract.exe`** (28 MB): CLI for batch extractions
 
-Executables are attached below this release.
+→ [Download from GitHub Releases](https://github.com/ZoomiesZaggy/3DS-Texture-Forge/releases/tag/v1.0-beta)
 
 Source code and full supported games list: [github.com/ZoomiesZaggy/3DS-Texture-Forge](https://github.com/ZoomiesZaggy/3DS-Texture-Forge)
