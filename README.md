@@ -1,111 +1,105 @@
 # 3DS Texture Forge
 
-Extract textures from Nintendo 3DS game ROMs (.3ds, .cia) and save them as PNG files.
+Extract textures from Nintendo 3DS game ROMs (.3ds, .cia) and save them as PNG files. Supports 35+ games with over 1 million textures across all supported titles. Includes quality reports, contact sheets, deduplication, and Azahar/Citra custom texture pack output.
 
 ## Download
 
 Download the latest release from the [Releases page](https://github.com/ZoomiesZaggy/3DS-Texture-Forge/releases).
 
-- **3DS Texture Forge.exe** — GUI app (recommended)
-- **3ds-tex-extract.exe** — Command-line tool
+- **3DS Texture Forge.exe** -- GUI app (recommended)
+- **3ds-forge-cli.exe** -- Command-line tool
 
 No installation needed. Just download and run.
 
 ## How to Use (GUI)
 
-1. **Get a decrypted 3DS ROM** — Use GodMode9 to dump and decrypt your game
-2. **Open 3DS Texture Forge** — Double-click the .exe
+1. **Get a decrypted 3DS ROM** -- Use GodMode9 to dump and decrypt your game
+2. **Open 3DS Texture Forge** -- Double-click the .exe
 3. **Drop your ROM file** onto the window (or click Browse)
-4. **Click "Extract Textures"** — Wait 10–600 seconds depending on game size
-5. **Click "Open Output Folder"** — Your textures are there as .png files
+4. **Click "Extract Textures"** -- Wait 10-600 seconds depending on game size
+5. **Click "Open Output Folder"** -- Your textures are there as .png files
 
 ## How to Use (CLI)
 
 ```
-3ds-tex-extract extract "game.3ds" -o output_folder --verbose
-3ds-tex-extract extract "game.3ds" -o output_folder --dedup
-3ds-tex-extract scan "game.3ds" --verbose
-3ds-tex-extract extract "game.3ds" --scan-all
+# Basic extraction
+python main.py extract "game.3ds" -o output_folder
+
+# With deduplication (saves disk space)
+python main.py extract "game.3ds" -o output_folder --dedup
+
+# Generate machine-readable report
+python main.py extract "game.3ds" -o output_folder --report
+
+# Scan ROM contents without extracting
+python main.py scan "game.3ds" --verbose
+
+# Deep scan (process all files, not just known extensions)
+python main.py extract "game.3ds" --scan-all
 ```
 
-## Tested Games
+## Azahar/Citra Output Mode
 
-| Game | Textures | Unique | Status |
-|------|----------|--------|--------|
-| Pokemon Y | 126,690 | 39,025 | ✅ |
-| Kid Icarus: Uprising | 58,210 | — | ✅ |
-| Kirby: Triple Deluxe | 51,059 | 16,498 | ✅ |
-| Pokemon Omega Ruby | 36,433 | 14,467 | ✅ |
-| Monster Hunter 4 Ultimate | 25,685 | — | ✅ |
-| Animal Crossing: New Leaf | 19,206 | 14,762 | ✅ |
-| Picross 3D: Round 2 | 12,631 | 1,265 | ✅ |
-| Cooking Mama: Sweet Shop | 12,050 | — | ✅ |
-| Kirby: Planet Robobot | 10,623 | 5,437 | ✅ |
-| Bravely Default | 8,626 | 1,566 | ✅ |
-| Super Mario 3D Land | 6,097 | 1,780 | ✅ |
-| Theatrhythm Final Fantasy | 4,076 | 3,621 | ✅ |
-| Zelda: Ocarina of Time 3D | 3,584 | 2,834 | ✅ |
-| Mario Kart 7 | 2,770 | 2,222 | ✅ |
-| Mario & Luigi: Dream Team | 2,849 | 1,661 | ✅ |
-| Corpse Party | 2,788 | 1,981 | ✅ |
-| Zelda: Majora's Mask 3D | 1,780 | — | ✅ |
-| Resident Evil: Revelations | 1,137 | 1,047 | ✅ |
-| Fire Emblem: Awakening | 868 | — | ✅ |
-| Nano Assault | 638 | 611 | ✅ |
-| RE: The Mercenaries 3D | 121 | 105 | ✅ |
-| Puzzle & Dragons Z | 4 | 3 | ✅ |
+Output textures directly in Azahar/Citra custom texture pack format:
+
+```
+python main.py extract "game.3ds" -o textures/ --output-mode azahar
+```
+
+This creates files named `tex1_<W>x<H>_<xxhash>_<fmt>.png` in a `<TitleID>/` subdirectory, matching Azahar's expected layout.
+
+For manual texture pack building:
+
+```
+python main.py extract "game.3ds" -o project/
+python main.py import-dump ~/azahar/dump/textures/TITLEID project/
+python main.py build-pack project/
+```
+
+## Supported Games
+
+| Game | Textures | Quality | Key Formats |
+|------|----------|---------|-------------|
+| Pokemon Y | 127,074 | 98.8% | GARC, BCH, ETC1 |
+| Kirby: Triple Deluxe | 54,377 | 98.4% | CGFX, ETC1A4 |
+| Pokemon Omega Ruby | 36,496 | 95.6% | GARC, BCH, ETC1 |
+| Animal Crossing: New Leaf | 21,517 | 93.7% | SARC, BCH |
+| Kirby: Planet Robobot | 16,591 | 96.9% | CGFX, ETC1A4 |
+| Bravely Default | 11,908 | 96.3% | BCH, ETC1 |
+| Fire Emblem: Awakening | 10,295 | 89.9% | FE ARC, BCH |
+| Theatrhythm Final Fantasy | 6,966 | 91.1% | BCH, ETC1A4 |
+| Zelda: Ocarina of Time 3D | 3,584 | -- | ZAR, CMB, CTXB |
+| Mario Kart 7 | 2,770 | 96.0% | CGFX, ETC1 |
+| Corpse Party | 2,659 | 81.3% | BCH, ETC1A4 |
+| Resident Evil: Revelations | 1,137 | -- | Capcom ARC, TEX |
+| Nano Assault | 638 | 91.5% | Shin'en TEX |
+| RE: The Mercenaries 3D | 121 | -- | Capcom ARC, TEX |
+| Kid Icarus: Uprising | 58,210 | -- | darc, BCH |
+| Monster Hunter 4 Ultimate | 25,685 | -- | Capcom ARC, TEX |
+| Picross 3D: Round 2 | 12,631 | -- | BCH, ETC1 |
+| Super Mario 3D Land | 6,097 | -- | NARC, CGFX |
+| Pokemon Sun/Moon | 10,000+ | -- | GARC, BCH |
+| Zelda: Majora's Mask 3D | 1,780 | -- | GAR, CMB, CTXB |
+| Zelda: A Link Between Worlds | 18,000+ | -- | SARC, BCH |
+| Dragon Quest VII | 10,000+ | -- | BCH, CTPK |
+| Dragon Quest VIII | 15,000+ | -- | BCH, CTPK |
+| Dead or Alive Dimensions | 4,000+ | -- | BCH |
+| Persona Q | 700+ | -- | CPK, BCH |
+| Super Smash Bros. 3DS | 5,000+ | -- | dt/ls, BCH |
+| Star Fox 64 3D | 500+ | -- | GDB1, BCH |
+| Fire Emblem Fates | 10,000+ | -- | FE ARC, BCH |
+| Fire Emblem Echoes | 10,000+ | -- | FE ARC, BCH |
 
 Many other 3DS games should also work.
 
-## What's New in v1.1-beta
+## Quality Reports
 
-### New Game Support
-- **Kid Icarus: Uprising** — 58,210 textures (darc archive parser)
-- **Monster Hunter 4 Ultimate** — 25,685 textures (Capcom ARC parser + TEX profiles)
-- **Cooking Mama: Sweet Shop** — 12,050 textures (LZ-compressed BCH support)
-- **Super Mario 3D Land** — 6,097 textures (NARC archive parser)
-- **Zelda: Majora's Mask 3D** — 1,780 textures (GAR archive parser + CMB bugfix)
-- **Fire Emblem: Awakening** — 868 textures (FE ARC parser)
-- **Bravely Default** — 8,626 textures
-- **Animal Crossing: New Leaf** — 19,206 textures
-- **Kirby: Triple Deluxe** — 51,059 textures
-- **Pokemon Omega Ruby** — 36,433 textures
-
-### Parser Improvements
-- BCH struct parser with proper header/GPU command parsing (replaces heuristic)
-- LZ-compressed files inside GARC archives now processed
-- GARC streaming for large (1 GB+) archives
-- CMB section count bugfix for Zelda games
-- MH4U Capcom TEX format profiles
-
-### New Archive Formats
-- NARC (Nintendo ARChive) — used by Super Mario 3D Land, Kirby
-- GAR (Grezzo Archive v2) — used by Zelda: Majora's Mask 3D
-- darc (Data ARChive) — used by Kid Icarus: Uprising
-- Capcom ARC — used by Monster Hunter series
-- FE ARC — used by Fire Emblem: Awakening
-
-### New Features
-- Texture deduplication reporting (unique count in every extraction summary)
-- `--dedup` flag to skip writing duplicate textures (saves disk space)
-- `raw_data_hash_xxh64` in manifest for Azahar/Citra texture pack scripting
-
-## For Azahar/Citra Custom Textures
-
-This tool extracts textures organized by source file. To use them as custom textures in Azahar (Citra fork):
-
-1. Extract textures with this tool
-2. In Azahar, enable "Dump Textures" and play the game briefly
-3. Use `import-dump` to match runtime hashes to extracted textures
-4. Run `build-pack` to produce a ready-to-use texture pack folder
-5. Enable "Load Custom Textures" in Azahar
-
-```
-3ds-tex-extract import-dump ~/azahar/dump/textures/TITLEID output_folder/
-3ds-tex-extract build-pack output_folder/
-```
-
-The `raw_data_hash_xxh64` field in `manifest.json` can also be used to write custom matching scripts.
+Every extraction generates `quality_report.json` and `quality_report.txt` with:
+- Total/valid/suspicious texture counts
+- Quality score (valid / total ratio)
+- Breakdown by suspicion type (solid color, low variance, extreme brightness, bad dimensions)
+- Normal map detection (HILO8 format)
+- Format distribution
 
 ## Supported Formats
 
@@ -115,30 +109,44 @@ The `raw_data_hash_xxh64` field in `manifest.json` can also be used to write cus
 - NCCH, RomFS (internal containers)
 
 ### Archive Formats
-- SARC / GARC (Nintendo archives)
-- NARC (Nintendo ARChive)
-- GAR (Grezzo Archive v2)
+- SARC / GARC / NARC (Nintendo archives)
+- ZAR / GAR (Grezzo Archives - Zelda)
 - darc (Nintendo Data ARChive)
 - Capcom MT Framework ARC
 - Fire Emblem ARC
-- ZAR / SZS / Yaz0
-- Nintendo LZ10/LZ11/LZ13 compression
+- CRI CPK (Persona Q, 7th Dragon)
+- Level-5 ARC0 (Layton, Yo-Kai Watch)
+- Smash Bros dt/ls archives
 
 ### Texture Formats
-- All 14 PICA200 GPU formats (RGBA8, RGB8, RGB565, ETC1, ETC1A4, etc.)
-- CGFX (Nintendo standard 3D textures)
+- All 14 PICA200 GPU formats (RGBA8, RGB8, RGB565, RGBA4, ETC1, ETC1A4, etc.)
+- BCH (Binary CTR H3D textures)
+- CGFX (NintendoWare graphics)
 - BFLIM / BCLIM (UI textures)
-- BCH (Binary CTR textures)
 - CTPK (CTR Texture Package)
-- CTXB / CMB (Grezzo textures)
+- CTXB / CMB (Grezzo containers)
 - Capcom MT Framework TEX
 - Shin'en TEX CTR
+- jIMG (Bandai Namco)
+- GDB1 (texture database)
+
+### Compression
+- Nintendo LZ10/LZ11/LZ13
+- BLZ (backward LZSS)
+- Yaz0/SZS
+- CRILAYLA (CRI streaming)
+- zlib/DEFLATE
+
+## Known Limitations
+
+- ROMs must be decrypted. Use GodMode9 to decrypt if needed
+- Some proprietary formats (MercurySteam, Retro Studios) are not supported
+- Texture quality depends on correct format identification from game headers
 
 ## Requirements
 
 - Windows 10/11 (64-bit)
 - A decrypted 3DS ROM file (.3ds or .cia)
-- ROMs must be decrypted — use GodMode9 to decrypt if needed
 
 ## Building from Source
 

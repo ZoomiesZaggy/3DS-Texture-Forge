@@ -391,11 +391,11 @@ class AboutDialog(QDialog):
         text.setOpenExternalLinks(True)
         text.setStyleSheet(f"background: {COL_BG_DARKER}; border: none; color: {COL_TEXT};")
         text.setHtml(f"""
-            <h2 style="color:{COL_TEXT};">3DS Texture Forge v1.1-beta</h2>
+            <h2 style="color:{COL_TEXT};">3DS Texture Forge v3.0</h2>
             <p>Extracts textures from decrypted Nintendo 3DS game ROMs.
             Textures are saved as PNG files organized by source.</p>
 
-            <p><b>Tested games (22 games, ~388,000 textures):</b></p>
+            <p><b>Tested games (35+ games, ~1M+ textures):</b></p>
             <table cellspacing="3">
             <tr><td style="color:{COL_GREEN};">&#10004;</td>
                 <td>Pokemon Y</td><td style="color:{COL_TEXT_DIM};">126,690 textures</td></tr>

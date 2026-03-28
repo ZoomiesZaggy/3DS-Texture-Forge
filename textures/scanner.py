@@ -33,6 +33,7 @@ from parsers.darc import is_darc, parse_darc
 from parsers.arc_capcom import is_capcom_arc, parse_capcom_arc
 from parsers.arc_fe import is_fe_arc, parse_fe_arc
 from parsers.lz import is_lz_compressed, decompress_lz, is_blz_compressed, decompress_blz
+import zlib as _zlib
 from parsers.cpk import is_cpk, iter_cpk_textures
 from parsers.arc0 import is_arc0, iter_arc0_textures
 from textures.jimg import is_jimg, parse_jimg
@@ -163,6 +164,9 @@ class FileFingerprint:
         elif is_blz_compressed(data):
             self.detected_type = "blz"
             self.confidence = "high"
+        elif len(data) >= 2 and data[0] == 0x78 and data[1] in (0x01, 0x5E, 0x9C, 0xDA):
+            self.detected_type = "zlib"
+            self.confidence = "medium"
         elif is_ctxb(data):
             self.detected_type = "ctxb"
             self.confidence = "high"
@@ -273,6 +277,8 @@ def extract_textures_with_confidence(
         textures = _extract_nintendo_lz(data, file_path, scan_all=scan_all, title_id=title_id)
     elif fp.detected_type == "blz":
         textures = _extract_blz(data, file_path, scan_all=scan_all, title_id=title_id)
+    elif fp.detected_type == "zlib":
+        textures = _extract_zlib(data, file_path, scan_all=scan_all, title_id=title_id)
     elif fp.detected_type == "garc":
         textures = _extract_garc(data, file_path, scan_all=scan_all, title_id=title_id)
     elif fp.detected_type == "zar":
@@ -545,6 +551,35 @@ def _extract_blz(data: bytes, file_path: str,
 
     logger.info(f"BLZ {file_path}: {len(data):,} -> {len(decompressed):,} bytes")
     inner_path = f"{file_path}[blz_decompressed]"
+    textures, _ = extract_textures_with_confidence(
+        decompressed, inner_path, scan_all=scan_all, title_id=title_id,
+    )
+    return textures
+
+
+def _extract_zlib(data: bytes, file_path: str,
+                   scan_all: bool = False,
+                   title_id: str = "") -> List[Dict[str, Any]]:
+    """Decompress zlib data and extract textures from the result."""
+    try:
+        decompressed = _zlib.decompress(data)
+    except _zlib.error:
+        return []
+    if not decompressed or len(decompressed) < 8:
+        return []
+
+    # Fast reject: skip if no recognizable texture magic
+    has_texture = False
+    if decompressed[:4] in _KNOWN_TEXTURE_MAGIC:
+        has_texture = True
+    elif len(decompressed) >= 0x28:
+        if decompressed[-0x28:-0x24] in _BFLIM_FOOTER_MAGICS:
+            has_texture = True
+    if not has_texture:
+        return []
+
+    logger.info(f"zlib {file_path}: {len(data):,} -> {len(decompressed):,} bytes")
+    inner_path = f"{file_path}[zlib_decompressed]"
     textures, _ = extract_textures_with_confidence(
         decompressed, inner_path, scan_all=scan_all, title_id=title_id,
     )

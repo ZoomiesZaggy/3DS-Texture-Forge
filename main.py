@@ -48,7 +48,7 @@ from output import (
     write_unknown_files, write_summary, sha1_bytes, sha1_rgba,
     compute_dedup_stats,
 )
-from quality import compute_quality_metrics
+from quality import compute_quality_metrics, generate_quality_report
 from contact_sheet import generate_contact_sheet
 from pack_builder import build_pack
 
@@ -162,7 +162,9 @@ def should_process_file(file_path: str, scan_all: bool) -> bool:
                # CRI CPK streaming archives (Persona Q, 7th Dragon III, Sonic Lost World)
                ".cpk",
                # Bandai Namco jIMG texture files (One Piece)
-               ".jtex", ".jarc"}:
+               ".jtex", ".jarc",
+               # Compressed data files (Luigi's Mansion, etc.)
+               ".data"}:
         return True
     path_lower = file_path.lower()
     for d in ["/tex/", "/texture/", "/textures/", "/gui/", "/effect/",
@@ -249,9 +251,14 @@ def cmd_extract(args, progress_callback=None):
     romfs = RomFSParser(romfs_data)
     files = romfs.list_files()
 
-    output_dir = args.output or os.path.join("output", title_id)
+    azahar_mode = getattr(args, 'output_mode', 'normal') == 'azahar'
+    if azahar_mode:
+        _base = args.output or "output"
+        output_dir = os.path.join(_base, title_id)
+    else:
+        output_dir = args.output or os.path.join("output", title_id)
     os.makedirs(output_dir, exist_ok=True)
-    logger.info(f"Output: {output_dir}")
+    logger.info(f"Output: {output_dir}" + (" [azahar mode]" if azahar_mode else ""))
 
     if args.list_files:
         print(f"\nRomFS: {len(files)} files\n")
@@ -508,7 +515,8 @@ def cmd_extract(args, progress_callback=None):
                         sha1_source_val=source_blob_sha1,
                         quality_metrics={"is_suspicious": False,
                                          "pct_transparent": 0,
-                                         "variance_score": 0},
+                                         "variance_score": 0,
+                                         "flags": []},
                     )
                     rec["content_hash"] = first_content_hash
                     rec["duplicate_of"] = first_tex_id
@@ -587,14 +595,21 @@ def cmd_extract(args, progress_callback=None):
             # Duplicates are not written to disk, so quality info is not needed
             # for the contact sheet or visual review.
             if not duplicate_of:
-                qm = compute_quality_metrics(rgba)
+                qm = compute_quality_metrics(rgba, pica_format=fmt)
             else:
                 qm = {"is_suspicious": False, "pct_transparent": 0.0,
-                      "variance_score": 0.0, "unique_colors": 0}
+                      "variance_score": 0.0, "unique_colors_sampled": 0,
+                      "flags": []}
 
             # Save PNG (skip if dedup mode and this is a duplicate)
-            fname = generate_output_filename(tex_global_idx, tex_info, file_path)
-            out_path = build_output_path(output_dir, file_path, fname)
+            if azahar_mode and _HAS_XXHASH and pixel_data:
+                # Azahar filename: tex1_<W>x<H>_<xxhash>_<fmt_int>.png
+                _xxh = _xxhash.xxh64(pixel_data).hexdigest().upper()
+                fname = f"tex1_{w}x{h}_{_xxh}_{fmt}.png"
+                out_path = os.path.join(output_dir, fname)
+            else:
+                fname = generate_output_filename(tex_global_idx, tex_info, file_path)
+                out_path = build_output_path(output_dir, file_path, fname)
 
             if dedup_active and duplicate_of:
                 # Count it but don't write the file
@@ -740,6 +755,20 @@ def cmd_extract(args, progress_callback=None):
     }
     write_summary(output_dir, summary)
 
+    # Always generate quality report (JSON + TXT)
+    fmt_dist: Dict[str, int] = {}
+    for r in records:
+        f = r.get("detected_format", "?")
+        fmt_dist[f] = fmt_dist.get(f, 0) + 1
+    quality_report = generate_quality_report(
+        records=records,
+        game_name=game_title,
+        rom_file=args.input,
+        output_dir=output_dir,
+        format_distribution=fmt_dist,
+    )
+    summary["quality_score"] = quality_report.get("quality_score", 0.0)
+
     # --report: write machine-readable report.json
     if getattr(args, 'report', False):
         parser_breakdown: Dict[str, int] = {}
@@ -750,7 +779,7 @@ def cmd_extract(args, progress_callback=None):
             f = r.get("detected_format", "?")
             format_breakdown[f] = format_breakdown.get(f, 0) + 1
         report_data = {
-            "tool_version": "1.1-beta",
+            "tool_version": "3.0",
             "rom_filename": rom_basename,
             "rom_size_mb": round(os.path.getsize(args.input) / (1024 * 1024), 2),
             "title_id": title_id,
@@ -790,12 +819,18 @@ def cmd_extract(args, progress_callback=None):
     print(tex_line)
     print(f"  Textures failed:        {decoded_fail}")
     print(f"  Suspicious outputs:     {suspicious_count}")
+    q_score = quality_report.get("quality_score", 0.0)
+    q_pct = round(q_score * 100, 1)
+    print(f"  Quality score:          {q_pct}%")
     print(f"  Unknown file types:     {unknown_types}")
     print(f"  Elapsed:                {elapsed:.1f}s")
     print(f"  Output:                 {output_dir}")
     if cs_path:
         print(f"  Contact sheet:          {cs_path}")
     print(f"{'='*56}")
+    if q_score < 0.50:
+        print(f"\n  WARNING: Only {q_pct}% of textures appear valid.")
+        print(f"  This usually means a pixel decoder bug.")
 
     return summary, records, failures
 
@@ -1076,6 +1111,8 @@ def build_parser():
                        help="Skip writing duplicate textures (keep first copy only)")
     p_ext.add_argument("--report", action="store_true",
                        help="Write a machine-readable report.json to the output directory")
+    p_ext.add_argument("--output-mode", choices=["normal", "azahar"], default="normal",
+                       help="Output mode: 'normal' (default) or 'azahar' (Azahar/Citra texture pack layout)")
     p_ext.add_argument("--verbose", action="store_true")
     p_ext.add_argument("--quiet", action="store_true")
 

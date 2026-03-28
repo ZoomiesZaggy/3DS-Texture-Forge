@@ -29,6 +29,13 @@ FMT_A4 = 0xB
 FMT_ETC1 = 0xC
 FMT_ETC1A4 = 0xD
 
+# Alternate format IDs used by some tools (Capcom, Atlus)
+FORMAT_ALIASES = {
+    0x14: FMT_RGBA8,   # Capcom alternate RGBA8
+    0x19: FMT_ETC1,    # Atlus alternate ETC1
+    0x1A: FMT_ETC1A4,  # Atlus alternate ETC1A4
+}
+
 FORMAT_NAMES = {
     FMT_RGBA8: "RGBA8",
     FMT_RGB8: "RGB8",
@@ -65,12 +72,19 @@ FORMAT_BPP = {
 }
 
 
+def resolve_format(fmt: int) -> int:
+    """Resolve alternate format IDs to standard PICA200 format IDs."""
+    return FORMAT_ALIASES.get(fmt, fmt)
+
+
 def get_format_name(fmt: int) -> str:
-    return FORMAT_NAMES.get(fmt, f"UNKNOWN_0x{fmt:X}")
+    resolved = resolve_format(fmt)
+    return FORMAT_NAMES.get(resolved, f"UNKNOWN_0x{fmt:X}")
 
 
 def get_format_bpp(fmt: int) -> int:
-    return FORMAT_BPP.get(fmt, 0)
+    resolved = resolve_format(fmt)
+    return FORMAT_BPP.get(resolved, 0)
 
 
 def calculate_texture_size(width: int, height: int, fmt: int) -> int:
@@ -212,6 +226,7 @@ def decode_texture(data: bytes, width: int, height: int, fmt: int) -> Optional[n
     Handles morton-order de-tiling and pixel format conversion.
     Returns an RGBA8 numpy array (height x width x 4) or None on failure.
     """
+    fmt = resolve_format(fmt)
     if width <= 0 or height <= 0:
         logger.warning(f"Invalid texture dimensions: {width}x{height}")
         return None
@@ -345,6 +360,7 @@ def decode_texture_fast(data: bytes, width: int, height: int, fmt: int) -> Optio
     Optimized texture decoder using pre-computed inverse morton table.
     This is the preferred entry point.
     """
+    fmt = resolve_format(fmt)
     if width <= 0 or height <= 0:
         return None
 
