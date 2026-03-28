@@ -553,6 +553,13 @@ def extract_bch_textures(data: bytes) -> List[Dict[str, Any]]:
     if not struct_textures:
         return heuristic_textures
 
+    # If struct parser found textures with valid data sizes, prefer it
+    # over heuristic results that may have size=0 (dimension misreads)
+    struct_valid = [t for t in struct_textures if t.get('data_size', 0) > 0]
+    heuristic_valid = [t for t in heuristic_textures if t.get('data_size', 0) > 0]
+    if struct_valid and not heuristic_valid:
+        return struct_textures
+
     # Merge: start with heuristic results (maintains baseline counts),
     # then enhance with struct names and add any struct-only textures.
     # Build a lookup from struct textures for name enhancement.
