@@ -553,52 +553,32 @@ def extract_bch_textures(data: bytes) -> List[Dict[str, Any]]:
     if not struct_textures:
         return heuristic_textures
 
-    # If struct parser found textures with valid data sizes, prefer it
-    # over heuristic results that may have size=0 (dimension misreads)
+    # Merge strategy: struct parser is authoritative for dimensions/format.
+    # Use struct results as primary, add heuristic results only for offsets
+    # not covered by struct parser.
     struct_valid = [t for t in struct_textures if t.get('data_size', 0) > 0]
-    heuristic_valid = [t for t in heuristic_textures if t.get('data_size', 0) > 0]
-    if struct_valid and not heuristic_valid:
-        return struct_textures
 
-    # Merge: start with heuristic results (maintains baseline counts),
-    # then enhance with struct names and add any struct-only textures.
-    # Build a lookup from struct textures for name enhancement.
-    struct_by_key = {}
-    for t in struct_textures:
-        key = (t['data_offset'], t['width'], t['height'], t['format'])
-        struct_by_key[key] = t
+    if struct_valid:
+        # Struct parser found real textures — use it as primary
+        struct_offsets = {t['data_offset'] for t in struct_valid}
+        merged = list(struct_valid)
 
-    # Enhance heuristic results with struct names where they match
-    seen_keys = set()
-    merged = []
-    for t in heuristic_textures:
-        key = (t['data_offset'], t['width'], t['height'], t['format'])
-        seen_keys.add(key)
-        struct_match = struct_by_key.get(key)
-        if struct_match and struct_match.get('name', '').replace('bch_tex_', ''):
-            # Use struct parser's name and corrected offset
-            enhanced = dict(t)
-            enhanced['name'] = struct_match['name']
-            if struct_match['data_offset'] != t['data_offset']:
-                enhanced['data_offset'] = struct_match['data_offset']
-                enhanced['data_size'] = struct_match['data_size']
-            merged.append(enhanced)
-        else:
-            merged.append(t)
+        # Add heuristic textures at offsets not found by struct parser
+        # (but only if they have valid data sizes)
+        heur_added = 0
+        for t in heuristic_textures:
+            if t.get('data_size', 0) > 0 and t.get('data_offset') not in struct_offsets:
+                t['index'] = len(merged)
+                merged.append(t)
+                struct_offsets.add(t['data_offset'])
+                heur_added += 1
 
-    # Add struct-only textures not found by heuristic
-    struct_added = 0
-    for t in struct_textures:
-        key = (t['data_offset'], t['width'], t['height'], t['format'])
-        if key not in seen_keys:
-            seen_keys.add(key)
-            t['index'] = len(merged)
-            merged.append(t)
-            struct_added += 1
-
-    if struct_added > 0:
-        logger.debug(f"BCH merge: {len(heuristic_textures)} heuristic + "
-                     f"{struct_added} struct-only = {len(merged)} total")
+        if heur_added > 0:
+            logger.debug(f"BCH merge: {len(struct_valid)} struct + "
+                         f"{heur_added} heuristic-only = {len(merged)} total")
+    else:
+        # No valid struct results — fall back to heuristic
+        merged = heuristic_textures
 
     return merged
 
