@@ -70,9 +70,3 @@ Parsers implemented | 25+
 <p>Executables are attached below this release.</p>
 <p>Source code and full supported games list: <a href="https://github.com/ZoomiesZaggy/3DS-Texture-Forge">github.com/ZoomiesZaggy/3DS-Texture-Forge</a></p></body></html><!--EndFragment-->
 </body>
-</html># 3DS Texture Forge: v1.0-beta Release Report
-
-**by ZoomiesZaggy · March 2026**
-
----
-
