@@ -82,13 +82,15 @@ def compute_quality_metrics(
         flags.append("INFO_NORMAL_MAP")
 
     if not is_tiny and not is_alpha_only and not is_normal_map:
-        # SOLID: >80% of pixels are identical
-        if pct_dominant > 80.0:
+        # SOLID: >95% of pixels are identical (raised from 80% to reduce
+        # false positives on gradient/tile textures in IMGC and tiled games)
+        if pct_dominant > 95.0:
             flags.append("SUSPICIOUS_SOLID")
             is_suspicious = True
 
-        # LOW_VARIANCE: stddev < 8 for textures > 16x16
-        if w > 16 and h > 16 and stddev < 8.0:
+        # LOW_VARIANCE: stddev < 5 for textures > 16x16
+        # (lowered from 8 — many legitimate shadow/gradient textures have stddev 5-8)
+        if w > 16 and h > 16 and stddev < 5.0:
             flags.append("SUSPICIOUS_LOW_VARIANCE")
             is_suspicious = True
 
