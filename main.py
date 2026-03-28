@@ -139,40 +139,59 @@ def parse_rom(input_path: str) -> Tuple[bytes, str, str, str]:
     return romfs_data, title_id_str, product_code, chain
 
 
-def should_process_file(file_path: str, scan_all: bool) -> bool:
+_PROCESS_EXTENSIONS = {
+    ".tex", ".bch", ".bcres", ".bflim", ".bclim", ".ctpk", ".cptk", ".ctxb", ".cmb", ".cgfx",
+    ".bcmdl", ".bctex", ".bcmcla", ".szs", ".zar", ".zsi",
+    ".bccam", ".bcsdr", ".bcptl", ".bhres", ".bhtex", ".cbres",
+    ".lz", ".cmp",
+    ".chres", ".chtex",
+    ".gar", ".lzs",
+    ".zrc",
+    ".fs",
+    ".texturegdb",
+    ".bin", ".raw", ".dat", ".img", ".arc", ".sarc", ".garc", ".narc",
+    ".nwmdl", ".nwtex", ".pmnweffb", ".nwenv", ".nwlyt",
+    ".fa",
+    ".cpk",
+    ".jtex", ".jarc",
+    ".data",
+    ".ctpk",
+}
+
+_PROCESS_DIRS = {
+    "/tex/", "/texture/", "/textures/", "/gui/", "/effect/",
+    "/model/", "/chr/", "/bg/", "/ui/", "/font/", "/a/",
+    "/kart/", "/course/", "/driver/", "/menu",
+    "/actor/", "/scene/", "/kankyo/", "/ending/", "/misc/",
+}
+
+
+def should_process_file(file_path: str, scan_all: bool,
+                        file_data: bytes = None) -> bool:
     if scan_all:
         return True
     ext = ""
     if "." in file_path:
         ext = "." + file_path.rsplit(".", 1)[-1].lower()
-    if ext in {".tex", ".bch", ".bcres", ".bflim", ".bclim", ".ctpk", ".cptk", ".ctxb", ".cmb", ".cgfx",
-               ".bcmdl", ".bctex", ".bcmcla", ".szs", ".zar", ".zsi",
-               ".bccam", ".bcsdr", ".bcptl", ".bhres", ".bhtex", ".cbres",
-               ".lz", ".cmp",
-               ".chres", ".chtex",
-               ".gar", ".lzs",
-               ".zrc",
-               ".fs",
-               ".texturegdb",
-               ".bin", ".raw", ".dat", ".img", ".arc", ".sarc", ".garc", ".narc",
-               # NintendoWare model/effect/texture containers (CGFX-based, e.g. Pac-Man NW4C engine)
-               ".nwmdl", ".nwtex", ".pmnweffb", ".nwenv", ".nwlyt",
-               # Level-5 FA/ARC0 archives (Layton, Yo-Kai Watch)
-               ".fa",
-               # CRI CPK streaming archives (Persona Q, 7th Dragon III, Sonic Lost World)
-               ".cpk",
-               # Bandai Namco jIMG texture files (One Piece)
-               ".jtex", ".jarc",
-               # Compressed data files (Luigi's Mansion, etc.)
-               ".data"}:
+    if ext in _PROCESS_EXTENSIONS:
         return True
     path_lower = file_path.lower()
-    for d in ["/tex/", "/texture/", "/textures/", "/gui/", "/effect/",
-              "/model/", "/chr/", "/bg/", "/ui/", "/font/", "/a/",
-              "/kart/", "/course/", "/driver/", "/menu",
-              "/actor/", "/scene/", "/kankyo/", "/ending/", "/misc/"]:
+    for d in _PROCESS_DIRS:
         if d in path_lower:
             return True
+    # For extensionless files, check magic bytes if data is provided
+    if not ext and file_data and len(file_data) >= 4:
+        magic = file_data[:4]
+        if magic in (b'CRAG', b'SARC', b'NARC', b'darc', b'Yaz0',
+                     b'CGFX', b'BCH\x00', b'CTPK', b'CTXB',
+                     b'ARC\x00', b'ARC0', b'CPK ', b'ZAR\x01',
+                     b'GAR2', b'jIMG', b'GDB1',
+                     b'\x10', b'\x11', b'\x13'):  # LZ magic bytes
+            return True
+        # Check for BFLIM/BCLIM footer magic (in last 0x28 bytes)
+        if len(file_data) >= 0x28:
+            if file_data[-0x28:-0x24] in (b'FLIM', b'CLIM'):
+                return True
     return False
 
 
@@ -366,8 +385,16 @@ def cmd_extract(args, progress_callback=None):
     seen_raw_hashes: Dict[str, tuple] = {}
 
     for file_idx, (file_path, file_offset, file_size) in enumerate(files):
-        if not should_process_file(file_path, args.scan_all):
-            continue
+        # For extensionless files, peek at magic bytes before deciding
+        _has_ext = "." in file_path
+        if _has_ext:
+            if not should_process_file(file_path, args.scan_all):
+                continue
+        else:
+            # No extension: peek magic bytes to decide
+            _peek_data = romfs_data[file_offset:file_offset + min(file_size, 0x30)] if file_size > 0 and file_offset > 0 else b""
+            if not should_process_file(file_path, args.scan_all, file_data=_peek_data):
+                continue
 
         files_scanned += 1
         if progress_callback:
