@@ -1,5 +1,4 @@
-# 3DS Texture Forge: v1.0-beta Release Report
-
+# 3DS Texture Forge: v1.0-beta Release
 **by ZoomiesZaggy · March 2026**
 
 ---
