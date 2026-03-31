@@ -30,6 +30,7 @@ from typing import Iterator, Tuple
 logger = logging.getLogger(__name__)
 
 ARC0_MAGIC = b'ARC0'
+XFSA_MAGIC = b'XFSA'
 XPCK_MAGIC = b'XPCK'
 
 # Standard 3DS texture magics we scan for within ARC0 data
@@ -47,8 +48,8 @@ _MIN_BLOB = 64
 
 
 def is_arc0(data: bytes) -> bool:
-    """Check if data starts with ARC0 magic."""
-    return len(data) >= 8 and data[:4] == ARC0_MAGIC
+    """Check if data starts with ARC0 or XFSA magic."""
+    return len(data) >= 8 and data[:4] in (ARC0_MAGIC, XFSA_MAGIC)
 
 
 def _lz10_try_decompress(data: bytes) -> bytes:
@@ -151,13 +152,15 @@ def iter_arc0_textures(data: bytes) -> Iterator[Tuple[str, bytes]]:
     if len(data) < 0x18:
         return
 
+    magic = data[:4]
     header_size = struct.unpack_from('<I', data, 4)[0]
     data_offset = struct.unpack_from('<I', data, 0x14)[0]
 
     if data_offset == 0 or data_offset >= len(data):
         data_offset = header_size
 
-    logger.debug(f"ARC0: header_size=0x{header_size:X}, data_offset=0x{data_offset:X}, "
+    archive_type = "XFSA" if magic == XFSA_MAGIC else "ARC0"
+    logger.debug(f"{archive_type}: header_size=0x{header_size:X}, data_offset=0x{data_offset:X}, "
                  f"file_size={len(data):,}")
 
     # Scan the data section for standard texture magics

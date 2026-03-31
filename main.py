@@ -203,7 +203,7 @@ def should_process_file(file_path: str, scan_all: bool,
                       b'CGFX', b'BCH\x00', b'CTPK', b'CTXB',
                       b'ARC\x00', b'ARC0', b'CPK ', b'ZAR\x01',
                       b'GAR2', b'jIMG', b'GDB1', b'3DST',
-                      b'GFAC'):
+                      b'GFAC', b'XFSA'):
             return True
         # LZ compression magic (single-byte check)
         if file_data[0] in (0x10, 0x11, 0x13):
