@@ -29,6 +29,9 @@ BFLIM_FORMAT_MAP = {
     0x0B: 0x0D,  # ETC1A4
     0x0C: 0x0A,  # L4
     0x0D: 0x08,  # A4 (mapped to A8, closest available)
+    # Extended NW4C format IDs (used by newer Nintendo games)
+    0x12: 0x0C,  # ETC1 (alternate ID)
+    0x13: 0x0D,  # ETC1A4 (alternate ID)
 }
 
 # BPP for each BFLIM format (used to compute storage dimensions)
@@ -36,6 +39,7 @@ _BFLIM_BPP = {
     0x00: 8, 0x01: 8, 0x02: 8, 0x03: 16, 0x04: 16,
     0x05: 16, 0x06: 24, 0x07: 16, 0x08: 16, 0x09: 32,
     0x0A: 4, 0x0B: 8, 0x0C: 4, 0x0D: 4,
+    0x12: 4, 0x13: 8,  # Extended ETC1/ETC1A4 IDs
 }
 
 
