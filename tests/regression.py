@@ -38,7 +38,7 @@ REGRESSION_GAMES = [
     ("Persona Q", 700, 0.60),
     ("Dragon Quest VIII", 15000, 0.60),
     ("Bravely Default", 10000, 0.70),
-    ("Legend of Zelda, The - A Link Between Worlds", 18000, 0.60),
+    ("Legend of Zelda, The - A Link Between Worlds", 13500, 0.60),
     ("Legend of Zelda, The - Ocarina of Time 3D", 3000, 0.70),
     ("Legend of Zelda, The - Majora's Mask 3D", 1500, 0.70),
     ("Dead or Alive Dimensions", 4000, 0.60),

@@ -1531,16 +1531,25 @@ class MainWindow(QMainWindow):
         import shutil
         src = self._result_output_dir
         if not os.path.isdir(src):
+            self.statusBar().showMessage("Output folder not found", 5000)
             return
-        # Copy all PNGs to Azahar load path
+        try:
+            os.makedirs(az_path, exist_ok=True)
+        except OSError as e:
+            self.statusBar().showMessage(f"Cannot create Azahar folder: {e}", 5000)
+            return
         tex_dir = os.path.join(src, "textures")
         if not os.path.isdir(tex_dir):
             tex_dir = src
         count = 0
-        for f in os.listdir(tex_dir):
-            if f.lower().endswith(".png"):
-                shutil.copy2(os.path.join(tex_dir, f), os.path.join(az_path, f))
-                count += 1
+        try:
+            for f in os.listdir(tex_dir):
+                if f.lower().endswith(".png"):
+                    shutil.copy2(os.path.join(tex_dir, f), os.path.join(az_path, f))
+                    count += 1
+        except OSError as e:
+            self.statusBar().showMessage(f"Copy failed after {count} files: {e}", 5000)
+            return
         self.statusBar().showMessage(f"Copied {count} textures to Azahar", 5000)
 
     # ── Error display ──
@@ -1615,5 +1624,11 @@ class MainWindow(QMainWindow):
         self.cfg["window_height"] = self.height()
         if self._loaded_path:
             self.cfg["last_input_path"] = self._loaded_path
-        self._save_settings()
+        # Save settings directly without status bar message (window is closing)
+        self.cfg["output_mode"] = "azahar" if self.rb_azahar.isChecked() else "standard"
+        self.cfg["scan_all_files"] = self.chk_scan_all.isChecked()
+        self.cfg["dedup"] = self.chk_dedup.isChecked()
+        self.cfg["dump_raw"] = self.chk_dump_raw.isChecked()
+        self.cfg["verbose_logging"] = self.chk_verbose.isChecked()
+        save_config(self.cfg)
         super().closeEvent(event)
