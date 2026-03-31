@@ -170,6 +170,7 @@ _PROCESS_EXTENSIONS = {
     ".jtex", ".jarc",
     ".data",
     ".ctpk",
+    ".gfa",
 }
 
 _PROCESS_DIRS = {
@@ -195,14 +196,20 @@ def should_process_file(file_path: str, scan_all: bool,
     for d in _PROCESS_DIRS:
         if d in path_lower:
             return True
-    # For extensionless files, check magic bytes if data is provided
-    if not ext and file_data and len(file_data) >= 4:
-        magic = file_data[:4]
-        if magic in (b'CRAG', b'SARC', b'NARC', b'darc', b'Yaz0',
-                     b'CGFX', b'BCH\x00', b'CTPK', b'CTXB',
-                     b'ARC\x00', b'ARC0', b'CPK ', b'ZAR\x01',
-                     b'GAR2', b'jIMG', b'GDB1',
-                     b'\x10', b'\x11', b'\x13'):  # LZ magic bytes
+    # For files with unknown extensions (or no extension), check magic bytes
+    if file_data and len(file_data) >= 4:
+        magic4 = file_data[:4]
+        if magic4 in (b'CRAG', b'SARC', b'NARC', b'darc', b'Yaz0',
+                      b'CGFX', b'BCH\x00', b'CTPK', b'CTXB',
+                      b'ARC\x00', b'ARC0', b'CPK ', b'ZAR\x01',
+                      b'GAR2', b'jIMG', b'GDB1', b'3DST',
+                      b'GFAC'):
+            return True
+        # LZ compression magic (single-byte check)
+        if file_data[0] in (0x10, 0x11, 0x13):
+            return True
+        # Check for gzip-compressed containers (4-byte size prefix + gzip)
+        if len(file_data) >= 6 and file_data[4:6] == b'\x1f\x8b':
             return True
         # Check for BFLIM/BCLIM footer magic (in last 0x28 bytes)
         if len(file_data) >= 0x28:
@@ -401,13 +408,9 @@ def cmd_extract(args, progress_callback=None):
     seen_raw_hashes: Dict[str, tuple] = {}
 
     for file_idx, (file_path, file_offset, file_size) in enumerate(files):
-        # For extensionless files, peek at magic bytes before deciding
-        _has_ext = "." in file_path
-        if _has_ext:
-            if not should_process_file(file_path, args.scan_all):
-                continue
-        else:
-            # No extension: peek magic bytes to decide
+        # Quick reject by extension first, then peek magic for unknown extensions
+        if not should_process_file(file_path, args.scan_all):
+            # Extension not in skip or process list (or extensionless) — peek magic
             _peek_data = romfs_data[file_offset:file_offset + min(file_size, 0x30)] if file_size > 0 and file_offset > 0 else b""
             if not should_process_file(file_path, args.scan_all, file_data=_peek_data):
                 continue

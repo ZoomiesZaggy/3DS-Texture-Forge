@@ -65,6 +65,13 @@ REGRESSION_GAMES = [
     ("Hatsune Miku", 4000, 0.60),
     ("Metal Gear Solid - Snake Eater", 1400, 0.60),
     ("Castlevania", 1800, 0.60),
+
+    # Phase 5 — zero investigation fixes
+    ("Conception II", 2500, 0.85),
+    ("Zero Escape - Zero Time Dilemma", 2000, 0.85),
+    ("Kirby's Extra Epic Yarn", 2500, 0.90),
+    ("Fossil Fighters - Frontier", 1800, 0.90),
+    ("Ultimate NES Remix", 1400, 0.85),
 ]
 
 

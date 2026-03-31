@@ -40,6 +40,7 @@ from textures.jimg import is_jimg, parse_jimg
 from textures.stex import is_stex, parse_stex
 from parsers.level5 import is_imgc, parse_imgc
 from parsers.l5_flat import is_l5_flat, iter_l5_flat
+from parsers.gfac import is_gfac, iter_gfac
 import numpy as np
 import os
 
@@ -200,6 +201,10 @@ class FileFingerprint:
         elif self.ext == ".bflim":
             self.detected_type = "bflim"
             self.confidence = "medium"
+        elif len(data) >= 6 and data[4:6] == b'\x1f\x8b':
+            # 4-byte decompressed size prefix + gzip data (Spike Chunsoft games)
+            self.detected_type = "gzip_container"
+            self.confidence = "medium"
         elif self.ext == ".ctpk":
             self.detected_type = "ctpk"
             self.confidence = "medium"
@@ -242,6 +247,9 @@ class FileFingerprint:
         elif is_l5_flat(data):
             self.detected_type = "l5_flat"
             self.confidence = "medium"
+        elif is_gfac(data):
+            self.detected_type = "gfac"
+            self.confidence = "high"
         elif self.ext == ".stex":
             self.detected_type = "stex"
             self.confidence = "medium"
@@ -338,6 +346,10 @@ def extract_textures_with_confidence(
         textures = _extract_arc0(data, file_path, scan_all=scan_all, title_id=title_id)
     elif fp.detected_type == "l5_flat":
         textures = _extract_l5_flat(data, file_path, title_id=title_id)
+    elif fp.detected_type == "gfac":
+        textures = _extract_gfac(data, file_path, scan_all=scan_all, title_id=title_id)
+    elif fp.detected_type == "gzip_container":
+        textures = _extract_gzip_container(data, file_path, scan_all=scan_all, title_id=title_id)
 
     if textures:
         return textures, fp
@@ -607,6 +619,38 @@ def _extract_zlib(data: bytes, file_path: str,
     return textures
 
 
+def _extract_gzip_container(data: bytes, file_path: str,
+                             scan_all: bool = False,
+                             title_id: str = "") -> List[Dict[str, Any]]:
+    """Decompress gzip container (4-byte LE size prefix + gzip data) and extract textures."""
+    import gzip as _gzip
+    if len(data) < 10 or data[4:6] != b'\x1f\x8b':
+        return []
+    try:
+        decompressed = _gzip.decompress(data[4:])
+    except Exception:
+        return []
+    if not decompressed or len(decompressed) < 8:
+        return []
+
+    # Fast reject: skip if no recognizable texture magic
+    has_texture = False
+    if decompressed[:4] in _KNOWN_TEXTURE_MAGIC:
+        has_texture = True
+    elif len(decompressed) >= 0x28:
+        if decompressed[-0x28:-0x24] in _BFLIM_FOOTER_MAGICS:
+            has_texture = True
+    if not has_texture:
+        return []
+
+    logger.info(f"gzip_container {file_path}: {len(data):,} -> {len(decompressed):,} bytes")
+    inner_path = f"{file_path}[gzip_decompressed]"
+    textures, _ = extract_textures_with_confidence(
+        decompressed, inner_path, scan_all=scan_all, title_id=title_id,
+    )
+    return textures
+
+
 def _extract_cpk(data: bytes, file_path: str,
                   scan_all: bool = False,
                   title_id: str = "") -> List[Dict[str, Any]]:
@@ -719,6 +763,35 @@ def _extract_l5_flat(data: bytes, file_path: str,
             logger.info(f"L5 flat {file_path}: {processed} containers, {len(textures)} textures...")
     if textures:
         logger.info(f"L5 flat {file_path}: {processed} containers, {len(textures)} textures")
+    return textures
+
+
+def _extract_gfac(data: bytes, file_path: str,
+                   scan_all: bool = False,
+                   title_id: str = "") -> List[Dict[str, Any]]:
+    """Extract textures from a Good-Feel archive (GFAC).
+
+    Entries may be GFCP-compressed. After decompression, look for BCH/CGFX/CTPK.
+    """
+    _TEX_MAGICS = {b'BCH\x00', b'CGFX', b'CTPK', b'CTXB'}
+    textures = []
+    processed = 0
+    for inner_name, inner_data in iter_gfac(data):
+        if len(inner_data) < 8:
+            continue
+        if inner_data[:4] in _TEX_MAGICS:
+            inner_path = f"{file_path}>{inner_name}"
+            inner_textures, _ = extract_textures_with_confidence(
+                inner_data, inner_path, scan_all=False, title_id=title_id,
+            )
+            for tex in inner_textures:
+                tex["source_file"] = inner_path
+            textures.extend(inner_textures)
+            processed += 1
+        if processed > 0 and processed % 200 == 0:
+            logger.info(f"GFAC {file_path}: {processed} containers, {len(textures)} textures...")
+    if textures:
+        logger.info(f"GFAC {file_path}: {processed} containers, {len(textures)} textures")
     return textures
 
 
