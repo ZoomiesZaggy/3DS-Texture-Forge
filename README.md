@@ -6,8 +6,13 @@ Extract textures from Nintendo 3DS game ROMs (.3ds, .cia) and save them as PNG f
 
 Download the latest release from the [Releases page](https://github.com/ZoomiesZaggy/3DS-Texture-Forge/releases).
 
+**Windows:**
 - **3DS Texture Forge.exe** -- GUI app (recommended)
-- **3ds-forge-cli.exe** -- Command-line tool
+- **3ds-tex-extract.exe** -- Command-line tool
+
+**Linux x86_64:**
+- **3DS-Texture-Forge-linux** -- GUI app
+- **3ds-tex-extract-linux** -- Command-line tool (make executable with `chmod +x`)
 
 No installation needed. Just download and run.
 
@@ -179,12 +184,12 @@ python gui_entry.py        # GUI
 
 ### Platform Support Matrix
 
-| Platform           | GUI | CLI | Pre-built binary |
-|--------------------|-----|-----|-----------------|
-| Windows x64        | Yes | Yes | Yes (.exe)      |
-| Linux x86_64       | Yes | Yes | Run from source |
-| Mac ARM (M-series) | Yes | Yes | Run from source |
-| Intel Mac          | Not supported         |
+| Platform           | GUI | CLI | Pre-built binary                   |
+|--------------------|-----|-----|------------------------------------|
+| Windows x64        | Yes | Yes | Yes -- download .exe               |
+| Linux x86_64       | Yes | Yes | Yes -- download binary             |
+| Mac ARM (M-series) | Yes | Yes | Run `scripts/build_mac.sh`         |
+| Intel Mac          | Not supported                               |
 
 ## Building from Source (Windows)
 
