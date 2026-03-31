@@ -4,20 +4,17 @@ set -e
 export WSLENV=""
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-echo "=== Installing system dependencies ==="
-sudo apt-get update -qq
-sudo apt-get install -y -qq python3-pip python3-venv python3-dev
-
-echo "=== Setting up venv ==="
-cd /mnt/c/claude/3ds-tex-extract
-rm -rf venv_linux
-python3 -m venv venv_linux
-source venv_linux/bin/activate
+echo "=== Installing pip (user-level, no sudo) ==="
+python3 -m pip --version 2>/dev/null || {
+    echo "Bootstrapping pip..."
+    python3 -c "import urllib.request; urllib.request.urlretrieve('https://bootstrap.pypa.io/get-pip.py', '/tmp/get-pip.py')"
+    python3 /tmp/get-pip.py --user --break-system-packages 2>&1 | tail -3
+}
+export PATH="$HOME/.local/bin:$PATH"
 
 echo "=== Installing Python dependencies ==="
-pip install --upgrade pip
-pip install -r requirements.txt
-pip install pyinstaller
+pip3 install --user --break-system-packages -r requirements.txt 2>&1 | tail -5
+pip3 install --user --break-system-packages pyinstaller 2>&1 | tail -3
 
 echo "=== Building CLI binary ==="
 pyinstaller --onefile \
