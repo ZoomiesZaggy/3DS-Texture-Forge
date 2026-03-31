@@ -49,7 +49,7 @@ Note: Pokemon X/Y/OR/AS work because they use standard BCH inside GARCs.
 
 | Game | Textures (--scan-all) | Issue |
 |------|-----------------------|-------|
-| Luigi's Mansion: Dark Moon | 869 | Next Level Games format (magic: 01130002) |
+| Luigi's Mansion: Dark Moon | 869 | NLG bundle: concatenated zlib streams → LZ13 chunks. No standard texture magics found in decompressed data. Proprietary NLG engine format. |
 
 ## Statistics from Full Library Scan (319 games)
 
