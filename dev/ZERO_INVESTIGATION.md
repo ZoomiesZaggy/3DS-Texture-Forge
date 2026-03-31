@@ -58,8 +58,9 @@ GFCP = 20-byte header + raw LZ10 data (no Nintendo LZ header).
 - Engine: Game Freak
 - DOM file type: extensionless GARC (333 files)
 - Magic bytes: CRAG (GARC)
-- Status: OPAQUE
-- Notes: GARC files contain LZ-compressed PC v5 wrappers. Our unwrapper handles PC v1 (BCH at 0x80) but v5 has different layout. BCH not found at expected offset.
+- Status: CRACKED
+- Textures: 23,674 per game
+- Notes: GARC files contain LZ-compressed PC v5/v11 section-based containers. Each section has 128-byte header with type string, width/height/format at +0x68. Raw PICA200 pixel data at +0x80. PC format mapping: 3→RGB8, 4→RGBA8, 22→RGBA5551, 35→RGB565, 37→ETC1A4, 40→ETC1.
 
 ### 3DST Format (Mega Man Legacy Collection)
 - Engine: Digital Eclipse / Capcom
@@ -86,8 +87,10 @@ GFCP = 20-byte header + raw LZ10 data (no Nintendo LZ header).
 
 ### Professor Layton (Level-5)
 - DOM file type: .fa (322-390 MB)
-- Magic bytes: XFSA
-- Status: OPAQUE — Level-5 XFSA archive format, not same as ARC0
+- Magic bytes: XFSA (Miracle Mask, Mystery Journey) or ARC0 (Azran Legacy, vs PW)
+- Status: CRACKED
+- Textures: 2,183 (Miracle Mask) + 5,417 (vs PW) + 2,882 (Azran Legacy) + 5,565 (Mystery Journey)
+- Notes: XFSA uses same data layout as ARC0 (IMGC textures + XPCK sub-containers). Extended is_arc0() to accept XFSA magic.
 
 ### Code of Princess (Agatsuma)
 - DOM file type: .rani (897 MB), .rtx (8 MB)
@@ -153,10 +156,8 @@ GFCP = 20-byte header + raw LZ10 data (no Nintendo LZ header).
 
 ## Formats Worth Future Investigation
 
-1. **XFSA** (Level-5) — Would unlock 2+ Professor Layton games
-2. **3DST** (Capcom/Digital Eclipse) — Would unlock Mega Man Legacy Collection (1,324 textures)
-3. **TBAF** (Marvelous) — Would unlock Harvest Moon games
-4. **CRAR** (Square Enix) — Would unlock Kingdom Hearts 3D bulk textures
-5. **G1T/G1L** (Koei Tecmo) — Would unlock Hyrule Warriors Legends
-6. **ACMP** (Atlus) — Would unlock Etrian Odyssey V
-7. **PC v5** (Game Freak) — Would unlock Pokemon Ultra Sun/Moon
+1. **3DST** (Capcom/Digital Eclipse) — Would unlock Mega Man Legacy Collection (1,324 textures). Uses proprietary compression on PICA200 data. Header has format/width/height at known offsets but pixel data is compressed with unknown algorithm (not zlib, LZ, or gzip). First u32 of payload varies; no consistent palette/index pattern found.
+2. **TBAF** (Marvelous) — Would unlock Harvest Moon games
+3. **CRAR** (Square Enix) — Would unlock Kingdom Hearts 3D bulk textures
+4. **G1T/G1L** (Koei Tecmo) — Would unlock Hyrule Warriors Legends
+5. **ACMP** (Atlus) — Would unlock Etrian Odyssey V
