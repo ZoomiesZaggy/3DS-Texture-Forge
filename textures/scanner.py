@@ -39,6 +39,7 @@ from parsers.arc0 import is_arc0, iter_arc0_textures
 from textures.jimg import is_jimg, parse_jimg
 from textures.stex import is_stex, parse_stex
 from parsers.level5 import is_imgc, parse_imgc
+from parsers.l5_flat import is_l5_flat, iter_l5_flat
 import numpy as np
 import os
 
@@ -238,6 +239,9 @@ class FileFingerprint:
         elif is_arc0(data):
             self.detected_type = "arc0"
             self.confidence = "high"
+        elif is_l5_flat(data):
+            self.detected_type = "l5_flat"
+            self.confidence = "medium"
         elif self.ext == ".stex":
             self.detected_type = "stex"
             self.confidence = "medium"
@@ -332,6 +336,8 @@ def extract_textures_with_confidence(
         textures = _extract_cpk(data, file_path, scan_all=scan_all, title_id=title_id)
     elif fp.detected_type == "arc0":
         textures = _extract_arc0(data, file_path, scan_all=scan_all, title_id=title_id)
+    elif fp.detected_type == "l5_flat":
+        textures = _extract_l5_flat(data, file_path, title_id=title_id)
 
     if textures:
         return textures, fp
@@ -649,6 +655,70 @@ def _extract_arc0(data: bytes, file_path: str,
         logger.debug(f"ARC0 {file_path}: error during extraction: {e}")
     if textures:
         logger.info(f"ARC0 {file_path}: {count} blobs, {len(textures)} textures")
+    return textures
+
+
+def _extract_l5_flat(data: bytes, file_path: str,
+                      title_id: str = "") -> List[Dict[str, Any]]:
+    """Extract textures from a Level-5 flat file archive (Fantasy Life etc).
+
+    Entries are often LZ11-compressed. CGFX/BCH/CTPK containers may be:
+    - At the start of the decompressed entry (direct containers)
+    - Embedded at an offset within the entry (Level-5 resource wrappers)
+    """
+    _TEX_MAGICS = {b'BCH\x00', b'CGFX', b'CTPK', b'CTXB'}
+    textures = []
+    processed = 0
+    for inner_name, inner_data in iter_l5_flat(data):
+        if len(inner_data) < 8:
+            continue
+        # Try LZ decompression first
+        work = inner_data
+        suffix = ""
+        if inner_data[0] in (0x10, 0x11, 0x13):
+            try:
+                decompressed = decompress_lz(inner_data)
+                if decompressed and len(decompressed) >= 8:
+                    work = decompressed
+                    suffix = "[lz]"
+            except Exception:
+                pass
+
+        # Direct container at start
+        if work[:4] in _TEX_MAGICS:
+            inner_path = f"{file_path}>{inner_name}{suffix}"
+            inner_textures, _ = extract_textures_with_confidence(
+                work, inner_path, scan_all=False, title_id=title_id,
+            )
+            for tex in inner_textures:
+                tex["source_file"] = inner_path
+            textures.extend(inner_textures)
+            if inner_textures:
+                processed += 1
+            continue
+
+        # Scan for embedded texture containers within the entry
+        # (Level-5 resource files embed CGFX at an offset, e.g. 0x180)
+        found_embedded = False
+        for i in range(0, min(len(work) - 4, 0x1000), 4):
+            if work[i:i+4] in _TEX_MAGICS:
+                sub_data = work[i:]
+                inner_path = f"{file_path}>{inner_name}{suffix}[+0x{i:X}]"
+                inner_textures, _ = extract_textures_with_confidence(
+                    sub_data, inner_path, scan_all=False, title_id=title_id,
+                )
+                for tex in inner_textures:
+                    tex["source_file"] = inner_path
+                textures.extend(inner_textures)
+                if inner_textures:
+                    processed += 1
+                    found_embedded = True
+                break  # Only extract first embedded container per entry
+
+        if processed > 0 and processed % 100 == 0:
+            logger.info(f"L5 flat {file_path}: {processed} containers, {len(textures)} textures...")
+    if textures:
+        logger.info(f"L5 flat {file_path}: {processed} containers, {len(textures)} textures")
     return textures
 
 
