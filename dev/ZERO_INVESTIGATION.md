@@ -3,8 +3,9 @@
 ## Summary
 
 Started: 134 zero-texture games
-After fixes: 123 zero-texture games
-**11 games cracked, 20,524 new textures**
+After session 1 fixes: 123 zero-texture games (11 cracked, 20,524 textures)
+After session 2 fixes: 117 zero-texture games (6 more cracked, ~63,395 more textures)
+**Total: 17 games cracked, ~83,919 new textures**
 
 ## Fixes Applied
 

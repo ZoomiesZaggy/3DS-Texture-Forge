@@ -72,6 +72,12 @@ REGRESSION_GAMES = [
     ("Kirby's Extra Epic Yarn", 2500, 0.90),
     ("Fossil Fighters - Frontier", 1800, 0.90),
     ("Ultimate NES Remix", 1400, 0.85),
+
+    # Phase 6 — Pokemon Ultra + Layton
+    ("Pokemon Ultra Sun", 18000, 0.90),
+    ("Professor Layton vs. Phoenix Wright", 4000, 0.90),
+    ("Professor Layton and the Miracle Mask", 1600, 0.90),
+    ("Professor Layton and the Azran Legacy", 2000, 0.90),
 ]
 
 
