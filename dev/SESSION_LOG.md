@@ -121,3 +121,48 @@ Result: 0 → 10,254 textures
 - Hatsune Miku: 4,982 textures (already working!)
 - Luigi's Mansion Dark Moon: NLG bundle format, documented, skipped
 
+### Phase 5: Cross-Platform Support
+
+#### 5A — Platform audit (DONE)
+Codebase is already cross-platform:
+- os.path.join for all path construction
+- Path.home() for config directory
+- PySide6 for GUI (cross-platform)
+- No Windows-specific APIs in core logic
+
+#### 5F — README updated (COMMITTED)
+- Added Linux/Mac ARM instructions
+- Added platform support matrix
+- Updated game counts and supported formats
+
+### Phase 6: Final Release
+
+#### 6A — Full regression: ALL PASS
+All 11 available core regression games pass.
+
+#### 6B — Regression suite updated (COMMITTED)
+- RE:Mercenaries threshold: 100 → 1,700
+- Added 4 new games: Fantasy Life, Hatsune Miku, MGS, Castlevania
+
+#### 6D — Executables rebuilding (in progress)
+
+---
+
+## Session Summary
+
+### Achievements:
+1. **Speed**: BCH heuristic scan 70% faster, 30% fewer function calls
+2. **Quality**: Format-aware thresholds (+3.5% FE Awakening, +1.4% DQ8)
+3. **RE:Mercenaries**: 155 → 2,151 textures (mip chain support + header fix)
+4. **Fantasy Life**: 0 → 10,254 textures (new Level-5 flat archive parser)
+5. **Cross-platform**: README with Linux/Mac instructions
+6. **Regression**: All games pass, 4 new games added
+
+### Commits (6 total):
+1. Speed optimizations: skip BCH section probing, batch LZ11, file skip-list
+2. Quality filtering: format-aware thresholds
+3. RE:Mercenaries TEX fix: header offset iteration + mipchain support
+4. Fantasy Life: Level-5 flat file archive parser
+5. README: cross-platform docs, new game counts
+6. Regression: updated thresholds and new games
+
