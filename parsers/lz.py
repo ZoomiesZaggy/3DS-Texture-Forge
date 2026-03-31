@@ -176,84 +176,95 @@ def _lz_extend(out: bytearray, distance: int, length: int, decomp_size: int) -> 
 
 
 def _decompress_lz11(data: bytes) -> bytes | None:
-    """Decompress LZ11 (extended LZSS with variable-length encoding)."""
+    """Decompress LZ11 (extended LZSS with variable-length encoding).
+
+    Optimized: batches consecutive literal bytes via slice copy,
+    uses while-loop for proper bit skipping.
+    """
     header = _read_header(data)
     if header is None:
         return None
     decomp_size, src = header
 
-    # Pre-allocate output; track write position to avoid repeated len() calls.
     out = bytearray(decomp_size)
     out_pos = 0
     data_len = len(data)
 
     while out_pos < decomp_size and src < data_len:
         flags = data[src]; src += 1
-        for bit in range(7, -1, -1):
+
+        # Fast path: flags == 0x00 means all 8 bits are literals.
+        if flags == 0:
+            n = min(8, decomp_size - out_pos, data_len - src)
+            if n > 0:
+                out[out_pos:out_pos + n] = data[src:src + n]
+                out_pos += n
+                src += n
+            continue
+
+        bit = 7
+        while bit >= 0:
             if out_pos >= decomp_size or src >= data_len:
                 break
-            if flags & (1 << bit):
-                # Back-reference with variable length encoding
-                indicator = data[src]; src += 1
-                top = indicator >> 4
+            if not (flags & (1 << bit)):
+                # Literal — count consecutive literal bits and batch copy
+                n_lit = 1
+                b2 = bit - 1
+                while b2 >= 0 and not (flags & (1 << b2)):
+                    n_lit += 1
+                    b2 -= 1
+                n_lit = min(n_lit, decomp_size - out_pos, data_len - src)
+                out[out_pos:out_pos + n_lit] = data[src:src + n_lit]
+                out_pos += n_lit
+                src += n_lit
+                bit -= n_lit
+                continue
 
-                if top == 0:
-                    # 3-byte back-ref: length 0x11-0x110
-                    if src + 1 >= data_len:
-                        break
-                    b2 = data[src]; src += 1
-                    b3 = data[src]; src += 1
-                    length = ((indicator & 0x0F) << 4) | (b2 >> 4)
-                    length += 0x11
-                    distance = ((b2 & 0x0F) << 8) | b3
-                    distance += 1
+            bit -= 1
 
-                elif top == 1:
-                    # 4-byte back-ref: length 0x111-0x10110
-                    if src + 2 >= data_len:
-                        break
-                    b2 = data[src]; src += 1
-                    b3 = data[src]; src += 1
-                    b4 = data[src]; src += 1
-                    length = ((indicator & 0x0F) << 12) | (b2 << 4) | (b3 >> 4)
-                    length += 0x111
-                    distance = ((b3 & 0x0F) << 8) | b4
-                    distance += 1
+            # Back-reference with variable length encoding
+            indicator = data[src]; src += 1
+            top = indicator >> 4
 
-                else:
-                    # 2-byte back-ref: length 1-0x10
-                    if src >= data_len:
-                        break
-                    b2 = data[src]; src += 1
-                    length = top + 1
-                    distance = ((indicator & 0x0F) << 8) | b2
-                    distance += 1
-
-                # Fast back-reference copy (inlined for speed)
-                ref_pos = out_pos - distance
-                copy_len = length if out_pos + length <= decomp_size else decomp_size - out_pos
-                if ref_pos >= 0:
-                    if distance >= copy_len:
-                        # Non-overlapping: single C-level slice assignment
-                        out[out_pos:out_pos + copy_len] = out[ref_pos:ref_pos + copy_len]
-                    else:
-                        # Overlapping: tile the reference pattern.
-                        # Pattern tiling correctly emulates byte-by-byte copy:
-                        #   e.g. dist=2, len=6, pattern=AB → ABABAB ✓
-                        pattern = bytes(out[ref_pos:ref_pos + distance])
-                        reps = (copy_len + distance - 1) // distance
-                        out[out_pos:out_pos + copy_len] = (pattern * reps)[:copy_len]
-                    out_pos += copy_len
-                else:
-                    # Rare: reference extends before output start (shouldn't
-                    # happen in valid LZ11, but handle defensively).
-                    for _ in range(copy_len):
-                        p = out_pos - distance
-                        out[out_pos] = out[p] if p >= 0 else 0
-                        out_pos += 1
+            if top == 0:
+                if src + 1 >= data_len:
+                    break
+                b2 = data[src]; b3 = data[src + 1]; src += 2
+                length = ((indicator & 0x0F) << 4) | (b2 >> 4)
+                length += 0x11
+                distance = ((b2 & 0x0F) << 8) | b3
+                distance += 1
+            elif top == 1:
+                if src + 2 >= data_len:
+                    break
+                b2 = data[src]; b3 = data[src + 1]; b4 = data[src + 2]; src += 3
+                length = ((indicator & 0x0F) << 12) | (b2 << 4) | (b3 >> 4)
+                length += 0x111
+                distance = ((b3 & 0x0F) << 8) | b4
+                distance += 1
             else:
-                # Literal byte
-                out[out_pos] = data[src]; src += 1; out_pos += 1
+                if src >= data_len:
+                    break
+                b2 = data[src]; src += 1
+                length = top + 1
+                distance = ((indicator & 0x0F) << 8) | b2
+                distance += 1
+
+            ref_pos = out_pos - distance
+            copy_len = min(length, decomp_size - out_pos)
+            if ref_pos >= 0:
+                if distance >= copy_len:
+                    out[out_pos:out_pos + copy_len] = out[ref_pos:ref_pos + copy_len]
+                else:
+                    pattern = bytes(out[ref_pos:ref_pos + distance])
+                    reps = (copy_len + distance - 1) // distance
+                    out[out_pos:out_pos + copy_len] = (pattern * reps)[:copy_len]
+                out_pos += copy_len
+            else:
+                for _ in range(copy_len):
+                    p = out_pos - distance
+                    out[out_pos] = out[p] if p >= 0 else 0
+                    out_pos += 1
 
     if out_pos >= decomp_size:
         return bytes(out)

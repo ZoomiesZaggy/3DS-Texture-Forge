@@ -139,6 +139,20 @@ def parse_rom(input_path: str) -> Tuple[bytes, str, str, str]:
     return romfs_data, title_id_str, product_code, chain
 
 
+# Extensions that NEVER contain textures — skip immediately before any I/O.
+_SKIP_EXTENSIONS = {
+    ".bcstm", ".bcwav", ".bcsnd", ".bcsar",   # Audio
+    ".bgm", ".brsar", ".bfsar", ".bfstm",     # Audio
+    ".moflex", ".mods",                        # Video
+    ".msbt", ".bmg",                           # Message/text
+    ".bfttf", ".bcfnt",                        # Fonts
+    ".shbin", ".bcsv",                         # Shaders/CSV
+    ".txt", ".xml", ".json", ".lua",           # Script/config
+    ".db", ".sav",                             # Database/save
+    ".mp4", ".aac", ".ogg", ".wav",            # Media
+    ".ips", ".bps",                            # Patches
+}
+
 _PROCESS_EXTENSIONS = {
     ".tex", ".bch", ".bcres", ".bflim", ".bclim", ".ctpk", ".cptk", ".ctxb", ".cmb", ".cgfx",
     ".bcmdl", ".bctex", ".bcmcla", ".szs", ".zar", ".zsi",
@@ -173,6 +187,8 @@ def should_process_file(file_path: str, scan_all: bool,
     ext = ""
     if "." in file_path:
         ext = "." + file_path.rsplit(".", 1)[-1].lower()
+    if ext in _SKIP_EXTENSIONS:
+        return False
     if ext in _PROCESS_EXTENSIONS:
         return True
     path_lower = file_path.lower()
