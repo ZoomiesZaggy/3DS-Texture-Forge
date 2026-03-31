@@ -32,7 +32,7 @@ REGRESSION_GAMES = [
     ("Kirby - Triple Deluxe", 10000, 0.70),
     ("Kirby - Planet Robobot", 5000, 0.70),
     ("Resident Evil - Revelations", 1100, 0.70),
-    ("Resident Evil - The Mercenaries 3D", 100, 0.60),
+    ("Resident Evil - The Mercenaries 3D", 1700, 0.60),
     ("Pac-Man and the Ghostly Adventures", 500, 0.60),
     ("Fire Emblem - Awakening", 10000, 0.70),
     ("Persona Q", 700, 0.60),
@@ -59,6 +59,12 @@ REGRESSION_GAMES = [
     ("Fire Emblem Fates", 10000, 0.60),
     ("Fire Emblem Echoes", 10000, 0.60),
     ("Xenoblade Chronicles 3D", 10000, 0.60),
+
+    # Phase 4 newly-working games
+    ("Fantasy Life", 8000, 0.60),
+    ("Hatsune Miku", 4000, 0.60),
+    ("Metal Gear Solid - Snake Eater", 1400, 0.60),
+    ("Castlevania", 1800, 0.60),
 ]
 
 
