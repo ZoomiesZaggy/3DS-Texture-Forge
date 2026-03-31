@@ -391,6 +391,98 @@ def _unwrap_pokemon_container(data: bytes) -> Optional[bytes]:
     return None
 
 
+# Pokemon Ultra Sun/Moon PC format mapping: PC format ID -> PICA200 format ID
+_PC_FORMAT_TO_PICA = {
+    3: 0x1,   # RGB8 (24bpp)
+    4: 0x0,   # RGBA8 (32bpp)
+    22: 0x2,  # RGBA5551 (16bpp)
+    35: 0x3,  # RGB565 (16bpp)
+    37: 0xD,  # ETC1A4 (8bpp)
+    40: 0xC,  # ETC1 (4bpp)
+}
+
+
+def _extract_pokemon_pc_sections(data: bytes, file_path: str) -> List[Dict[str, Any]]:
+    """Extract textures from Pokemon Ultra Sun/Moon PC v5+ section-based format.
+
+    PC header: "PC" + version(u8) + 0x00 + section_offsets[version+1] (u32 LE each)
+    Each texture section has a 128-byte header with width/height/format at +0x68.
+    Pixel data (raw PICA200 tiled) starts at section_offset + 0x80.
+    """
+    if len(data) < 0x10 or data[:2] not in (b'PC', b'PT', b'MM'):
+        return []
+    version = data[2]
+    if version < 2 or version > 30:
+        return []
+
+    # Parse section offsets
+    offsets = []
+    for i in range(version + 1):
+        off = 4 + i * 4
+        if off + 4 > len(data):
+            return []
+        offsets.append(struct.unpack_from('<I', data, off)[0])
+
+    textures = []
+    for si in range(len(offsets) - 1):
+        sec_off = offsets[si]
+        sec_end = offsets[si + 1]
+        if sec_off + 0x80 > len(data) or sec_end > len(data):
+            continue
+
+        # Check if this section is a texture (type string at +0x08)
+        type_end = data.find(b'\x00', sec_off + 8, sec_off + 32)
+        if type_end < 0:
+            continue
+        type_str = data[sec_off + 8:type_end].decode('ascii', errors='replace')
+        if type_str != 'texture':
+            continue
+
+        # Read dimensions and format from section header
+        w = struct.unpack_from('<H', data, sec_off + 0x68)[0]
+        h = struct.unpack_from('<H', data, sec_off + 0x6A)[0]
+        pc_fmt = struct.unpack_from('<H', data, sec_off + 0x6C)[0]
+
+        if w == 0 or h == 0 or w > 2048 or h > 2048:
+            continue
+
+        pica_fmt = _PC_FORMAT_TO_PICA.get(pc_fmt)
+        if pica_fmt is None:
+            continue
+
+        # Pixel data starts at section_offset + 0x80
+        pixel_off = sec_off + 0x80
+        pixel_size = sec_end - pixel_off
+        if pixel_size <= 0 or pixel_off + pixel_size > len(data):
+            continue
+
+        pixel_data = data[pixel_off:pixel_off + pixel_size]
+
+        # Read texture name
+        name_end = data.find(b'\x00', sec_off + 0x28, sec_off + 0x60)
+        tex_name = ""
+        if name_end > sec_off + 0x28:
+            tex_name = data[sec_off + 0x28:name_end].decode('ascii', errors='replace')
+        if not tex_name:
+            tex_name = f"tex_{si}"
+
+        # Return raw pixel data — main pipeline handles decode
+        textures.append({
+            "name": tex_name,
+            "width": w,
+            "height": h,
+            "format": pica_fmt,
+            "format_name": FORMAT_NAMES.get(pica_fmt, f"unk_{pica_fmt}"),
+            "data": bytes(pixel_data),
+            "data_size": len(pixel_data),
+            "confidence": "high",
+            "parser_used": "pokemon_pc_v5",
+            "source_file": file_path,
+        })
+
+    return textures
+
+
 def _extract_garc(data: bytes, file_path: str,
                    scan_all: bool = False,
                    title_id: str = "") -> List[Dict[str, Any]]:
@@ -474,19 +566,27 @@ def _extract_garc(data: bytes, file_path: str,
 
     for inner_name, work, is_compressed in bin_all:
         suffix = "[lz]" if is_compressed else ""
-        unwrapped = _unwrap_pokemon_container(work)
-        if unwrapped is not None:
-            inner_path = f"{file_path}>{inner_name}{suffix}[unwrap]"
-            inner_textures, _ = extract_textures_with_confidence(
-                unwrapped, inner_path, scan_all=False, title_id=title_id,
-            )
-        elif work[:4] in (b'BCH\x00', b'CGFX', b'CTPK'):
-            inner_path = f"{file_path}>{inner_name}{suffix}"
-            inner_textures, _ = extract_textures_with_confidence(
-                work, inner_path, scan_all=False, title_id=title_id,
-            )
-        else:
-            continue
+        inner_path = f"{file_path}>{inner_name}{suffix}"
+        inner_textures = []
+        # Try Pokemon Ultra Sun/Moon PC v5+ section-based format first
+        if work[:2] in (b'PC', b'PT', b'MM') and work[2] >= 2:
+            pc_textures = _extract_pokemon_pc_sections(work, inner_path)
+            if pc_textures:
+                inner_textures = pc_textures
+        # Fall back to legacy BCH unwrap for older Pokemon games
+        if not inner_textures:
+            unwrapped = _unwrap_pokemon_container(work)
+            if unwrapped is not None:
+                unwrap_path = f"{inner_path}[unwrap]"
+                inner_textures, _ = extract_textures_with_confidence(
+                    unwrapped, unwrap_path, scan_all=False, title_id=title_id,
+                )
+            elif work[:4] in (b'BCH\x00', b'CGFX', b'CTPK'):
+                inner_textures, _ = extract_textures_with_confidence(
+                    work, inner_path, scan_all=False, title_id=title_id,
+                )
+            else:
+                continue
         for tex in inner_textures:
             tex["source_file"] = inner_path
             tex["garc_parent"] = file_path
