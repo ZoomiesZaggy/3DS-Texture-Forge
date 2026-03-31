@@ -10,8 +10,10 @@ from typing import Dict, Any, List, Optional
 
 logger = logging.getLogger(__name__)
 
-# PICA200 alpha-only formats
+# PICA200 format categories for quality thresholds
 _ALPHA_FORMATS = {0x8, 0xB}  # A8, A4
+_COMPRESSED_FORMATS = {0xC, 0xD}  # ETC1, ETC1A4
+_GRAYSCALE_FORMATS = {0x5, 0x7, 0x9, 0xA}  # LA8, L8, LA4, L4
 
 
 def compute_quality_metrics(
@@ -22,11 +24,18 @@ def compute_quality_metrics(
     Compute quality metrics for a decoded RGBA texture.
     Returns a dict of metrics and flags for suspicious images.
 
+    Format-aware thresholds reduce false positives for:
+      - ETC1/ETC1A4: compression artifacts reduce variance; higher thresholds
+      - LA/L formats: grayscale textures legitimately look dark/uniform
+      - HILO8: normal maps, never flagged as suspicious
+      - A4/A8: alpha-only, expected to look solid/dark
+      - Small textures (<=16x16): exempt from variance/solid checks
+
     Flags:
-      SUSPICIOUS_SOLID       — >80% identical pixels
-      SUSPICIOUS_LOW_VARIANCE— stddev < 8 (for textures > 16x16)
-      SUSPICIOUS_EXTREME     — mean luminance < 5 or > 250
-      SUSPICIOUS_DIMS        — bad dimensions (0, non-pow2, >4096)
+      SUSPICIOUS_SOLID       — dominant pixel exceeds threshold
+      SUSPICIOUS_LOW_VARIANCE— stddev below threshold (format-dependent)
+      SUSPICIOUS_EXTREME     — mean luminance outside range (format-dependent)
+      SUSPICIOUS_DIMS        — bad dimensions (0, >4096, extreme aspect ratio)
       INFO_NORMAL_MAP        — HILO8 format (expected, not suspicious)
     """
     h, w = rgba.shape[:2]
@@ -69,39 +78,59 @@ def compute_quality_metrics(
     else:
         pct_dominant = 100.0
 
-    # Build flags
+    # Build flags with format-aware thresholds
     flags = []
     is_suspicious = False
 
-    # Exceptions: skip flagging for tiny textures, alpha-only formats
-    is_tiny = (w <= 8 and h <= 8)
+    is_tiny = (w <= 16 and h <= 16)  # Expanded from 8x8 to 16x16
     is_alpha_only = pica_format in _ALPHA_FORMATS
     is_normal_map = (pica_format == 0x6)  # HILO8
+    is_compressed = pica_format in _COMPRESSED_FORMATS
+    is_grayscale = pica_format in _GRAYSCALE_FORMATS
 
     if is_normal_map:
         flags.append("INFO_NORMAL_MAP")
 
     if not is_tiny and not is_alpha_only and not is_normal_map:
-        # SOLID: >95% of pixels are identical (raised from 80% to reduce
-        # false positives on gradient/tile textures in IMGC and tiled games)
-        if pct_dominant > 95.0:
+        # --- SOLID threshold (format-dependent) ---
+        # ETC1/ETC1A4: compression quantizes colors → higher solid threshold.
+        # Many legitimate ETC1 textures (shadow maps, masks) are >95% solid.
+        solid_threshold = 99.0 if is_compressed else 97.0 if is_grayscale else 95.0
+        if pct_dominant > solid_threshold:
             flags.append("SUSPICIOUS_SOLID")
             is_suspicious = True
 
-        # LOW_VARIANCE: stddev < 5 for textures > 16x16
-        # (lowered from 8 — many legitimate shadow/gradient textures have stddev 5-8)
-        if w > 16 and h > 16 and stddev < 5.0:
-            flags.append("SUSPICIOUS_LOW_VARIANCE")
-            is_suspicious = True
+        # --- LOW_VARIANCE threshold (format-dependent) ---
+        # ETC1/ETC1A4: compression reduces variance; legitimate shadow maps
+        # often have stddev 2-5 after ETC1 quantization.
+        # Grayscale (LA/L): inherently lower variance, only flag very uniform.
+        if w > 16 and h > 16:
+            if is_compressed:
+                variance_threshold = 3.0  # More lenient for ETC1
+            elif is_grayscale:
+                variance_threshold = 3.0  # Grayscale formats are naturally low-variance
+            else:
+                variance_threshold = 5.0  # Default for RGBA/RGB
+            if stddev < variance_threshold:
+                flags.append("SUSPICIOUS_LOW_VARIANCE")
+                is_suspicious = True
 
-        # EXTREME: mean luminance < 5 or > 250
-        if mean_luminance < 5.0 or mean_luminance > 250.0:
+        # --- EXTREME luminance threshold (format-dependent) ---
+        # ETC1/ETC1A4: dark shadow maps are common in games with dynamic lighting.
+        # Grayscale: legitimately very dark or very bright (e.g., light maps).
+        if is_compressed or is_grayscale:
+            extreme_dark = 2.0    # Very lenient for compressed/grayscale
+            extreme_bright = 253.0
+        else:
+            extreme_dark = 5.0
+            extreme_bright = 250.0
+        if mean_luminance < extreme_dark or mean_luminance > extreme_bright:
             flags.append("SUSPICIOUS_EXTREME")
             is_suspicious = True
 
-    # DIMS: bad dimensions
-    def _is_pow2(n):
-        return n > 0 and (n & (n - 1)) == 0
+    # --- DIMS check: invalid dimensions only ---
+    # Only flag truly invalid dimensions. Thin strips and non-power-of-2
+    # are common in legitimate textures (gradient lookups, UI elements).
     if w == 0 or h == 0 or w > 4096 or h > 4096:
         flags.append("SUSPICIOUS_DIMS")
         is_suspicious = True
