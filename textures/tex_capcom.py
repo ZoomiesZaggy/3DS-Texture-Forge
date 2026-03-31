@@ -385,20 +385,27 @@ def _try_variant_rer_payload(data: bytes, base: TexParseResult,
     elif fmt_raw in CAPCOM_FORMAT_MAP:
         fmt_pica = CAPCOM_FORMAT_MAP[fmt_raw]
 
-    hdr_size = 0x14
-    full_payload = len(data) - hdr_size
-    if full_payload <= 0:
-        return None
+    # Try each header offset from the profile (different TEX versions use
+    # different header sizes: v0xA5 = 0x14, v0xA4 = 0x10).
+    header_offsets = profile.get("header_offsets", [0x14, 0x10, 0x18, 0x20])
 
-    # --- Strategy 1: full payload as base level ---
-    result = _try_rer_match_payload(data, base, title_id, profile,
-                                     full_payload, hdr_size, fmt_raw, fmt_pica,
-                                     fmt_map, "full_payload")
-    if result:
-        return result
+    for hdr_size in header_offsets:
+        full_payload = len(data) - hdr_size
+        if full_payload <= 0:
+            continue
+
+        # --- Strategy 1: full payload as base level ---
+        result = _try_rer_match_payload(data, base, title_id, profile,
+                                         full_payload, hdr_size, fmt_raw, fmt_pica,
+                                         fmt_map, f"full_payload/hdr=0x{hdr_size:X}")
+        if result:
+            return result
 
     # --- Strategy 2: read u32_LE at offset 0x14 as base mip level size ---
-    if len(data) >= 0x18:
+    # This handles v0xA5 files with a mip offset table after the 0x14-byte header.
+    hdr_size = header_offsets[0]  # Use primary header offset for mip table
+    full_payload = len(data) - hdr_size
+    if len(data) >= 0x18 and full_payload > 0:
         mip0_size = read_u32_le(data, 0x14)
         if 0 < mip0_size < full_payload and mip0_size != full_payload:
             # The mip offset table starts at file offset 0x14.
@@ -495,6 +502,22 @@ def _try_rer_match_payload(data: bytes, base: TexParseResult,
                 candidates.append((w, h, pica_id, -1, bpp, score,
                                    f"{method_prefix}/pica_scan"))
 
+    # Try mip chain matching: payload contains base + mipmaps
+    if not candidates:
+        if fmt_pica >= 0 and fmt_pica in PICA_BPP:
+            bpp = PICA_BPP[fmt_pica]
+            mip_dims = _find_mipchain_dims(payload_size, bpp)
+            for w, h, mip_count, score in mip_dims:
+                candidates.append((w, h, fmt_pica, fmt_raw, bpp, score,
+                                   f"{method_prefix}/mipchain_{mip_count}"))
+        # Try all PICA formats for mip chains
+        if not candidates:
+            for pica_id, bpp in PICA_BPP.items():
+                mip_dims = _find_mipchain_dims(payload_size, bpp)
+                for w, h, mip_count, score in mip_dims:
+                    candidates.append((w, h, pica_id, -1, bpp, score,
+                                       f"{method_prefix}/mipchain_scan_{mip_count}"))
+
     if not candidates:
         return None
 
@@ -512,16 +535,26 @@ def _try_rer_match_payload(data: bytes, base: TexParseResult,
     r.height = h
     r.format_raw = raw_fmt if raw_fmt >= 0 else fmt_raw
     r.format_pica = pica_id
-    r.mip_count = 1
     r.data_offset = data_start
-    r.expected_data_size = payload_size
-    r.actual_data_size = payload_size
 
-    # Extract only base level pixel data
-    end = data_start + payload_size
-    if end > len(data):
-        end = len(data)
-    r.pixel_data = data[data_start:end]
+    # For mip chain matches, extract only the base level
+    if "mipchain" in method:
+        base_size = (w * h * bpp + 7) // 8
+        r.mip_count = int(method.split("_")[-1]) if method.split("_")[-1].isdigit() else 1
+        r.expected_data_size = base_size
+        r.actual_data_size = base_size
+        end = data_start + base_size
+        if end > len(data):
+            end = len(data)
+        r.pixel_data = data[data_start:end]
+    else:
+        r.mip_count = 1
+        r.expected_data_size = payload_size
+        r.actual_data_size = payload_size
+        end = data_start + payload_size
+        if end > len(data):
+            end = len(data)
+        r.pixel_data = data[data_start:end]
 
     # Confidence
     if "profile_fmt" in method and score >= 3:
@@ -602,6 +635,50 @@ def _find_pow2_dims_for_payload(payload: int, bpp: int) -> List[Tuple[int, int, 
 
         results.append((w, h, score))
 
+    return results
+
+
+def _find_mipchain_dims(payload: int, bpp: int) -> List[Tuple[int, int, int, int]]:
+    """
+    Given a payload that may contain a full mip chain, find (width, height, mip_count, score).
+
+    For each pow2 base dimension, compute the cumulative mip chain size and check
+    if it matches the payload. Returns matches sorted by score (best first).
+    """
+    if bpp <= 0:
+        return []
+
+    results = []
+    for exp_w in range(3, 11):  # 8 to 1024
+        w = 1 << exp_w
+        for exp_h in range(3, 11):  # 8 to 1024
+            h = 1 << exp_h
+            # Compute mip chain: sum of all mip levels from (w,h) down to (8,8) or smaller
+            total = 0
+            mw, mh = w, h
+            mip_count = 0
+            while mw >= 4 and mh >= 4:
+                mip_size = (mw * mh * bpp + 7) // 8
+                total += mip_size
+                mip_count += 1
+                if total == payload:
+                    score = 1
+                    if w == h:
+                        score += 2
+                    elif max(w, h) / min(w, h) <= 4:
+                        score += 1
+                    if 32 <= w <= 512 and 32 <= h <= 512:
+                        score += 1
+                    if mip_count >= 3:
+                        score += 1  # Prefer multi-level chains
+                    results.append((w, h, mip_count, score))
+                    break
+                if total > payload:
+                    break
+                mw >>= 1
+                mh >>= 1
+
+    results.sort(key=lambda x: -x[3])
     return results
 
 
