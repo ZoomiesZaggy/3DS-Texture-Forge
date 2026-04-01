@@ -57,8 +57,14 @@ def iter_gfac(data: bytes) -> Iterator[Tuple[str, bytes]]:
             # Uncompressed: calculate size from gap to next entry or end
             next_off = len(data)
             if i + 1 < entry_count:
-                next_off = struct.unpack_from('<I', data, e_off + 16 + 12)[0]
+                next_entry_off = e_off + 16 + 12
+                if next_entry_off + 4 <= len(data):
+                    candidate = struct.unpack_from('<I', data, next_entry_off)[0]
+                    if data_off < candidate <= len(data):
+                        next_off = candidate
             raw_size = min(decomp_size, next_off - data_off, len(data) - data_off)
+            if raw_size < 0:
+                raw_size = 0
             entry_data = data[data_off:data_off + raw_size]
 
         if entry_data and len(entry_data) >= 4:
