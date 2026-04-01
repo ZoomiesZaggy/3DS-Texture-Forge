@@ -85,6 +85,9 @@ def _decompress_gfcp(data: bytes, offset: int, expected_size: int) -> bytes:
     decomp_size = struct.unpack_from('<I', data, offset + 0x0C)[0]
     comp_size = struct.unpack_from('<I', data, offset + 0x10)[0]
 
+    if decomp_size == 0:
+        return b''
+
     payload_start = offset + 0x14
     payload_end = min(payload_start + comp_size, len(data))
     payload = data[payload_start:payload_end]
@@ -92,23 +95,19 @@ def _decompress_gfcp(data: bytes, offset: int, expected_size: int) -> bytes:
     if not payload:
         return b''
 
-    # Prepend a fake LZ10 header so our existing decompressor can handle it
     from parsers.lz import decompress_lz
-    fake_header = bytes([0x10]) + struct.pack('<I', decomp_size)[:3]
-    try:
-        result = decompress_lz(fake_header + payload)
-        if result and len(result) > 0:
-            return result
-    except Exception:
-        pass
 
-    # Fallback: try LZ11 header
-    fake_header = bytes([0x11]) + struct.pack('<I', decomp_size)[:3]
-    try:
-        result = decompress_lz(fake_header + payload)
-        if result and len(result) > 0:
-            return result
-    except Exception:
-        pass
+    # Build fake Nintendo LZ header — use extended 8-byte header for sizes > 16MB
+    for type_byte in (0x10, 0x11):
+        if decomp_size <= 0xFFFFFF:
+            fake_header = bytes([type_byte]) + struct.pack('<I', decomp_size)[:3]
+        else:
+            fake_header = bytes([type_byte, 0x00, 0x00, 0x00]) + struct.pack('<I', decomp_size)
+        try:
+            result = decompress_lz(fake_header + payload)
+            if result and len(result) > 0:
+                return result
+        except Exception:
+            pass
 
     return b''
