@@ -204,7 +204,7 @@ def iter_arc0_textures(data: bytes) -> Iterator[Tuple[str, bytes]]:
                                 found += 1
                                 break
 
-        offset = idx + 4
+        offset = xpck_end  # advance past the full XPCK extent, not just 4 bytes
 
     if found:
         logger.info(f"ARC0: found {found} standard texture blobs in {xpck_count} XPCK entries")
