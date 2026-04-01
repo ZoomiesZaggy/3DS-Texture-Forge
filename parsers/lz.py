@@ -140,41 +140,6 @@ def _decompress_lz10(data: bytes) -> bytes | None:
     return None
 
 
-def _lz_extend(out: bytearray, distance: int, length: int, decomp_size: int) -> None:
-    """Copy `length` bytes from `distance` bytes back in `out`.
-
-    Handles overlapping copies correctly by using a repeating-pattern trick:
-    build the reference pattern (up to `distance` bytes), then tile it to
-    cover `length` bytes, and extend in one C-level call.  This is ~10-30x
-    faster than the equivalent Python byte-by-byte loop.
-    """
-    pos = len(out) - distance
-    if pos < 0:
-        # Rare: reference extends before the start of the buffer.
-        # Fall back to the safe byte-by-byte path.
-        avail = decomp_size - len(out)
-        for _ in range(min(length, avail)):
-            p = len(out) - distance
-            out.append(out[p] if p >= 0 else 0)
-        return
-
-    # Clamp to not exceed decomp_size
-    length = min(length, decomp_size - len(out))
-    if length <= 0:
-        return
-
-    # Build the tile pattern (≤ distance bytes).  Tiling this pattern
-    # naturally produces the correct overlapping-copy semantics:
-    #   e.g. distance=2, length=6, pattern=AB → ABABAB  ✓
-    #        distance=3, length=7, pattern=ABC → ABCABCA ✓
-    pattern = bytes(out[pos : pos + distance])
-    if len(pattern) >= length:
-        out.extend(pattern[:length])
-    else:
-        reps = (length + len(pattern) - 1) // len(pattern)
-        out.extend((pattern * reps)[:length])
-
-
 def _decompress_lz11(data: bytes) -> bytes | None:
     """Decompress LZ11 (extended LZSS with variable-length encoding).
 
