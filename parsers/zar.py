@@ -79,6 +79,11 @@ def _parse_zar_inner(data: bytes) -> List[Tuple[str, bytes]]:
         if not name:
             name = f"{i:04d}.bin"
 
+        # Bounds check: reject entries that exceed file bounds
+        if fsize > file_len or current_data_off + fsize > file_len:
+            logger.warning(f"ZAR entry {i} ({name}): fsize {fsize} exceeds file bounds, stopping")
+            break
+
         # Extract file data
         if current_data_off + fsize > file_len:
             inner_data = data[current_data_off:file_len]
