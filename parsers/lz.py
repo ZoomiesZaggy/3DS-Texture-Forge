@@ -358,7 +358,11 @@ def decompress_blz(data: bytes) -> bytes | None:
                         dst -= 1
                         if dst < 0:
                             return None
-                        result[dst] = result[dst + disp]
+                        read_pos = dst + disp
+                        if read_pos >= decomp_size:
+                            logger.debug(f"BLZ: corrupt back-reference read_pos={read_pos} >= decomp_size={decomp_size}")
+                            return None
+                        result[dst] = result[read_pos]
                 else:
                     # Literal byte
                     src -= 1
