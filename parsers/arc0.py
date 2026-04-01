@@ -57,7 +57,8 @@ def _lz10_try_decompress(data: bytes) -> bytes:
 
     Level-5 encodes: u32 LE where method = val & 7, dec_size = val >> 3.
     Method 1 = standard LZ10 bitstream.
-    Returns decompressed data or empty bytes on failure.
+    Delegates to lz.py's optimized decompress_lz after constructing a
+    standard Nintendo LZ10 header.
     """
     if len(data) < 8:
         return b''
@@ -68,37 +69,17 @@ def _lz10_try_decompress(data: bytes) -> bytes:
     dec_size = val >> 3
     if dec_size == 0 or dec_size > 16 * 1024 * 1024:
         return b''
-
-    pos = 4
-    output = bytearray()
+    from parsers.lz import decompress_lz
+    if dec_size <= 0xFFFFFF:
+        lz_header = bytes([0x10]) + struct.pack('<I', dec_size)[:3]
+    else:
+        lz_header = bytes([0x10, 0x00, 0x00, 0x00]) + struct.pack('<I', dec_size)
     try:
-        while len(output) < dec_size and pos < len(data):
-            flags = data[pos]
-            pos += 1
-            for bit in range(8):
-                if len(output) >= dec_size:
-                    break
-                if flags & (0x80 >> bit):
-                    if pos + 1 >= len(data):
-                        break
-                    b0 = data[pos]
-                    b1 = data[pos + 1]
-                    pos += 2
-                    length = (b0 >> 4) + 3
-                    disp = ((b0 & 0x0F) << 8) | b1
-                    for _ in range(length):
-                        if len(output) >= dec_size:
-                            break
-                        idx = len(output) - disp - 1
-                        output.append(output[idx] if 0 <= idx < len(output) else 0)
-                else:
-                    if pos >= len(data):
-                        break
-                    output.append(data[pos])
-                    pos += 1
-    except Exception:
-        pass
-    return bytes(output[:dec_size])
+        result = decompress_lz(lz_header + data[4:])
+        return result if result else b''
+    except (ValueError, MemoryError) as e:
+        logger.debug(f"arc0 LZ10 decompression failed: {e}")
+        return b''
 
 
 def _find_texture_blobs(data: bytes, base_offset: int = 0) -> Iterator[Tuple[str, bytes]]:
