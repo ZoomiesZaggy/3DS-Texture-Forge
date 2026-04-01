@@ -290,11 +290,16 @@ def _decompress_lz13(data: bytes) -> bytes | None:
 
     # Fallback: reverse-LZ11 interpretation (payload stored backwards)
     reversed_data = bytearray()
-    reversed_data.append(0x11)
-    size_le = decomp_size & 0xFFFFFF
-    reversed_data.append(size_le & 0xFF)
-    reversed_data.append((size_le >> 8) & 0xFF)
-    reversed_data.append((size_le >> 16) & 0xFF)
+    if decomp_size <= 0xFFFFFF:
+        reversed_data.append(0x11)
+        reversed_data.append(decomp_size & 0xFF)
+        reversed_data.append((decomp_size >> 8) & 0xFF)
+        reversed_data.append((decomp_size >> 16) & 0xFF)
+    else:
+        # Extended header for sizes > 16MB
+        reversed_data.append(0x11)
+        reversed_data.extend(b'\x00\x00\x00')
+        reversed_data.extend(struct.pack('<I', decomp_size))
     reversed_data.extend(reversed(inner))
 
     result = _decompress_lz11(bytes(reversed_data))
