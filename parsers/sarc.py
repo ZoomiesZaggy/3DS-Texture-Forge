@@ -117,7 +117,8 @@ def _parse_sarc_inner(data: bytes) -> List[Tuple[str, bytes]]:
             noff = strings_start + name_off_words * 4
             if noff < len(data):
                 end = noff
-                while end < len(data) and data[end] != 0:
+                limit = min(noff + 512, len(data))
+                while end < limit and data[end] != 0:
                     end += 1
                 name = data[noff:end].decode('utf-8', errors='replace')
 
