@@ -122,7 +122,11 @@ def _garc_iter(data: bytes) -> Iterator[Tuple[str, bytes]]:
         logger.warning(f"GARC: expected BTAF, got {data[fatb_off:fatb_off+4]!r}")
         return
 
+    MAX_GARC_ENTRIES = 100_000
     fatb_entry_count = struct.unpack_from('<I', data, fatb_off + 8)[0]
+    if fatb_entry_count > MAX_GARC_ENTRIES:
+        logger.warning(f"GARC: entry count {fatb_entry_count} exceeds limit ({MAX_GARC_ENTRIES})")
+        return
 
     # Each FATB entry is fixed 16 bytes: vector(4) + start(4) + end(4) + length(4)
     entries_start = fatb_off + 12
