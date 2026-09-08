@@ -1,0 +1,5 @@
+numpy>=1.24
+Pillow>=10.0
+xxhash>=3.0
+PySide6>=6.6   ; extra == "gui"
+pyinstaller>=6.0 ; extra == "build"

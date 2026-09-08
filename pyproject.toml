@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tex-forge"
+version = "2.0.0"
+description = "Extract textures from Nintendo 3DS ROMs (.3ds, .cia) and emit PNGs / Azahar texture packs."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [{ name = "ZoomiesZaggy" }]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Games/Entertainment",
+    "Topic :: Multimedia :: Graphics",
+]
+dependencies = [
+    "numpy>=1.24",
+    "Pillow>=10.0",
+    "xxhash>=3.0",
+]
+
+[project.optional-dependencies]
+gui = ["PySide6>=6.6"]
+build = ["pyinstaller>=6.0"]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+tex-forge = "tex_forge.cli:main"
+
+[project.gui-scripts]
+tex-forge-gui = "tex_forge.gui.entry:main"
+
+[tool.setuptools.packages.find]
+include = ["tex_forge*"]

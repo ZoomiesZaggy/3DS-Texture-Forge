@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls C:\\\\\\\\claude\\\\\\\\3ds-tex-extract\\\\\\\\)",
+      "Bash(python -c \"import cityhash\")",
+      "Bash(python -m pip install pyhash)",
+      "Bash(where python *)",
+      "Bash(where py *)"
+    ]
+  }
+}
