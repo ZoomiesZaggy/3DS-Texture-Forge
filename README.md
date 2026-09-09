@@ -1,6 +1,18 @@
+> **A note on how this was built:** This tool was developed entirely with Claude (Anthropic's AI assistant). Weeks of diligent prompting, oversight, and iteration. Not a weekend vibe-coding session. I want to be upfront about that because the community has complicated feelings about AI, and those feelings are valid. My position: AI writing code is a tool, the same way a compiler is a tool. AI generating art is a different conversation, one I personally land on the opposite side of. Which is exactly why this tool exists. It extracts raw source textures from 3DS ROMs so that artists, modders, and preservationists can do the painstaking, skilled, human work of redrawing, remastering, and reimagining them properly. **The extraction is automated. The artistry is yours.**
+
+---
+
+## Why this exists
+
+The AYN Thor changed things. A handheld powerful enough to run Azahar at full speed, in a clamshell form factor (two screens, the way Nintendo intended) finally made 3DS games feel like a platform worth investing in again rather than a museum piece. And Azahar's custom texture support means you can actually do something with that hardware: replace the original 240p assets with hand-crafted high-resolution replacements and experience games like Ocarina of Time 3D, Fire Emblem Awakening, or Pokémon X the way they were always trying to look, constrained only by a 2011 GPU.
+
+The problem is that getting those original textures out of a ROM was either impossible, broken, or required stitching together three different tools none of which agreed on format. 3DS Texture Forge exists to fix that. Drop in a decrypted ROM, get a folder of PNGs. That's it.
+
+---
+
 # 3DS Texture Forge 2.0
 
-A ground-up refactor of [3DS-Texture-Forge 1.1](https://github.com/ZoomiesZaggy/3DS-Texture-Forge) — same texture coverage, tighter architecture.
+A ground-up refactor of [3DS-Texture-Forge 1.1](https://github.com/ZoomiesZaggy/3DS-Texture-Forge): same texture coverage, tighter architecture.
 
 ## What's different
 
@@ -205,9 +217,11 @@ staging mode, and pipeline graceful-failure paths, multi-content CIA chunk-recor
 ## Status
 
 - ✅ All 14 PICA200 pixel formats decode (numpy + python fallback)
-- ✅ All compressors from v1 ported (LZ10/11/13, BLZ, Yaz0, zlib, gzip-prefix) **plus CRILAYLA standalone codec, plus Level-5 method-byte wrapper**
-- ✅ All archive parsers from v1 ported (12 plugins; CPK uses verbatim-vendored core)
+- ✅ All compressors from v1 ported (LZ10/11/13, BLZ, Yaz0, zlib, gzip-prefix), plus a correct variable-length **CRILAYLA** codec (real 13-bit-distance + 2/3/5/8-bit length encoding, verified byte-exact against real CPK entries) and the **Level-5 method-byte wrapper**
+- ✅ All archive parsers from v1 ported (12 plugins; the CPK path now calls the shared CRILAYLA codec instead of a separate vendored copy, so the two cannot drift)
 - ✅ All texture container parsers from v1 ported (12 plugins; BCH/CGFX/CTPK/CTXB/CMB/BFLIM/jIMG/Shinen/STEX/Capcom-TEX/GDB1/IMGC)
+- ✅ Level-5 Huffman child-offset corrected (byte-vs-word + alignment base) and moved off the pure-Python per-bit path (numpy bit pre-expansion, python fallback retained)
+- ✅ Azahar lookup hash now covers the mip0 surface only, so mipped CGFX packs match the emulator's runtime hash (single-surface textures are unchanged)
 - ✅ CLI parity with v1: `extract`, `scan`, `report`, `build-pack`, `import-dump`
 - ✅ Multi-content CIA extraction: `extract` walks content 0 + update/DLC CFAs, tags each manifest record with `source_content`, shares dedup across contents; the GUI (scan + extract) is multi-content aware too
 - ✅ GUI uses the new pipeline (vendored v1 UI for now)
@@ -215,5 +229,7 @@ staging mode, and pipeline graceful-failure paths, multi-content CIA chunk-recor
 - ✅ Quality report (JSON + TXT) with format-aware suspicion thresholds
 - ✅ Contact sheet generator
 - ✅ Pack builder (azahar / mapped / staging). Azahar packs are drop-in: `tex1_<W>x<H>_<CityHash64>_<code>_mip0.png` filenames + a minimal `pack.json` pinning `use_new_hash: false` (legacy hash); Forge's own metadata lives in `forge_pack_meta.json` so it never collides with Azahar's pack config
+- 🔧 Deferred: teaching the CGFX parser to report the real `mip0_size` / `mip_count` so the manifest is honest (the Azahar hash-site slice is the correct fix in the meantime)
+- 🔧 Deferred gate: the Level-5 Huffman correctness and perf changes are unit-tested against canonical fixtures, but no ROM reachable in the current environment exercises the Level-5 Huffman path, so the on-ROM wall-clock gate is outstanding (see `docs/CODE_OVERVIEW.md`)
 
 The reference v1 codebase still lives at `outputs/reference/3DS-Texture-Forge-1.1/`.
