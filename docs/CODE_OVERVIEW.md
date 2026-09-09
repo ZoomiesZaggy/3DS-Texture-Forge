@@ -824,3 +824,16 @@ Restored the 'A note on how this was built' blockquote and the 'Why this exists'
 - Fantasy Life remains 0 in v2 (unhandled ztex container). This predates and is unrelated to this pass; flagged here as the biggest single gap for a future task.
 
 Deferred: (a) CGFX parser reporting real mip0_size/mip_count; (b) on-ROM Level-5 Huffman wall-clock gate (no Huffman-bearing ROM reachable); (c) ztex/zmdl texture support (blocks Fantasy Life's ~10,254).
+
+---
+
+## 2026-09-08 pass 2: Fantasy Life zero - diagnosis
+
+### Task 1 verdict: Case A (v1 -> v2 regression)
+
+ROM: `D:\Roms\3DS\3ds-decrypted-roms321com\all\Fantasy Life (USA) Decrypted.3ds` (the stated `D:\3ds\` and No-Intro paths are absent this pass too). Title ID `0004000000113200`. Both v1 and v2 carry the same NoCrypto guard, so both were run against a working copy with the NCCH NoCrypto flag set (`C:\temp\roms\FL_patched.3ds`); the RomFS is genuinely plaintext (IVFC).
+
+- v1 reference (`outputs/reference/3DS-Texture-Forge-1.1/main.py extract`): **10,254** textures decoded OK (220 unique, 97.9% dupes), quality 99.7%, 55.1s, files scanned 2, recognized containers 2. Matches the reference audit row exactly.
+- v2 current tree: **0** textures, files scanned 2, 46.8s.
+
+Both scan the same 2 files (`_file_archive.bin` is the payload) and both recognize 2 containers, so file scanning and archive detection are NOT the regression. The loss is downstream: v1 turns the Level-5 flat archive entries into 10,254 textures and v2 turns them into nothing. This is a genuine regression in the Level-5 flat / IMGC extraction path, not a missing brand-new container. Proceeding to task 2A. (The earlier "missing ztex/zmdl support" note from pass 1 was wrong: v1 never needed a ztex parser either, yet extracted 10,254 from the same bytes.)
