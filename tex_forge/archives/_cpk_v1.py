@@ -189,60 +189,15 @@ def _read_typed(data: bytes, pos: int, type_id: int,
 def _decompress_crilayla(data: bytes) -> Optional[bytes]:
     """Decompress CRILAYLA-compressed data.
 
-    CRILAYLA layout:
-      [0x00] magic "CRILAYLA" (8)
-      [0x08] decomp_size u32 LE  (size of compressed body's decompressed output)
-      [0x0C] comp_size   u32 LE  (size of the compressed body)
-      [0x10] compressed body     (comp_size bytes, read backwards)
-      [0x10 + comp_size] prefix  (uncompressed header of original file)
-
-    Final output = prefix + decompressed_body
+    Delegates to the single shared implementation in
+    ``tex_forge.compression.crilayla`` so the live CPK path and the registered
+    codec can never drift apart. The v1 copy here implemented a different
+    (fixed 2-byte) algorithm and produced garbage; see that module and
+    docs/CODE_OVERVIEW.md. Imported lazily to avoid an archives->compression
+    import cycle at module load.
     """
-    if len(data) < 0x10:
-        return None
-    if data[:8] != b'CRILAYLA':
-        return None
-
-    decomp_size = struct.unpack_from('<I', data, 8)[0]
-    comp_size   = struct.unpack_from('<I', data, 0xC)[0]
-
-    if decomp_size > 64 * 1024 * 1024:
-        logger.debug(f"CRILAYLA: decomp_size {decomp_size:,} too large, skipping")
-        return None
-
-    # Prefix: bytes after the compressed body (uncompressed header of original file)
-    prefix_off = 0x10 + comp_size
-    prefix = data[prefix_off:] if prefix_off < len(data) else b''
-
-    out = bytearray(decomp_size)
-    out_pos = decomp_size
-    # Read compressed body backwards: from byte (0x10 + comp_size - 1) down to 0x10
-    in_pos = min(0x10 + comp_size - 1, len(data) - 1)
-
-    while out_pos > 0 and in_pos >= 0x10:
-        flag = data[in_pos]; in_pos -= 1
-        for bit in range(8):
-            if out_pos <= 0 or in_pos < 0x10:
-                break
-            if flag & (0x80 >> bit):
-                # Back-reference: 2 bytes encode length and distance
-                if in_pos < 0x11:
-                    break
-                hi = data[in_pos]; in_pos -= 1
-                lo = data[in_pos]; in_pos -= 1
-                length = (hi >> 3) + 3
-                dist   = ((hi & 0x07) << 8) | lo
-                for _ in range(length):
-                    if out_pos <= 0:
-                        break
-                    out_pos -= 1
-                    out[out_pos] = out[out_pos + dist + 1] if (out_pos + dist + 1) < decomp_size else 0
-            else:
-                # Literal byte
-                out_pos -= 1
-                out[out_pos] = data[in_pos]; in_pos -= 1
-
-    return bytes(prefix) + bytes(out)
+    from tex_forge.compression.crilayla import decompress_crilayla
+    return decompress_crilayla(data)
 
 
 # Known texture container magics to locate inside multi-segment CRILAYLA output

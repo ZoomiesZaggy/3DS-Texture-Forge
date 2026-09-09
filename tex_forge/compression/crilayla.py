@@ -4,16 +4,31 @@ Format:
     +0x00  "CRILAYLA" magic (8 bytes)
     +0x08  decompressed_body_size u32 LE
     +0x0C  compressed_body_size   u32 LE
-    +0x10  compressed body, read BACKWARDS (comp_size bytes)
-    +0x10 + comp_size  uncompressed prefix (original file's leading bytes)
+    +0x10  compressed body, comp_size bytes; its bitstream is read
+           BACKWARDS (from the last body byte toward 0x10), MSB-first
+    +0x10 + comp_size  uncompressed prefix (original file's leading bytes,
+           usually the 0x100-byte raw header)
 
-The final output is `prefix + reversed-decompression(body)`.
+The final output is `prefix + reversed-decompression(body)`. The body region
+is filled from its high address downward.
 
-Bit-level flags + 2-byte backref encoding:
-    flag byte (8 bits, MSB-first):
-        bit set -> backref: read 2 bytes BACKWARD; length = (hi >> 3) + 3,
-                   distance = ((hi & 7) << 8) | lo
-        bit clear -> literal byte (1 byte backward)
+Bitstream token encoding (MSB-first within each byte, bytes consumed backward):
+    1 bit:
+        0 -> literal: the next 8 bits are one output byte
+        1 -> back-reference:
+                distance = 13 bits + 3
+                length   = 3 + a variable-length count assembled from
+                           successive 2, 3, 5, then 8-bit chunks. Each chunk
+                           is added to the length; while a chunk holds its
+                           all-ones maximum, read the next wider chunk and keep
+                           adding. After the 8-bit chunk, keep reading 8-bit
+                           chunks while each equals 255.
+                The copy source is `dest + distance` (already-written bytes at
+                a higher address).
+
+This is a genuine variable-length LZSS, not the fixed 2-byte scheme the v1
+code implemented. Verified byte-exact against Dragon Ball Fusions CPK entries
+and cross-checked against two independent reference ports.
 
 References:
     https://github.com/Sewer56/CriFsV2Lib
@@ -39,6 +54,10 @@ def _detect(data: bytes) -> bool:
     return len(data) >= 0x10 and data[:8] == b"CRILAYLA"
 
 
+#: Variable-length count chunk widths (bits), read in this order.
+_VLE_WIDTHS = (2, 3, 5, 8)
+
+
 def _decompress(data: bytes) -> Optional[bytes]:
     if not _detect(data):
         return None
@@ -51,36 +70,67 @@ def _decompress(data: bytes) -> Optional[bytes]:
     prefix_off = 0x10 + comp_size
     prefix = data[prefix_off:] if prefix_off < len(data) else b""
 
-    out = bytearray(decomp_size)
-    out_pos = decomp_size
-    # Read body in reverse: from the last byte before prefix down to 0x10.
+    # Body bitstream state: consumed from the last body byte backward, MSB
+    # first. `bit_pool`/`bits_left` buffer the current byte.
     in_pos = min(0x10 + comp_size - 1, len(data) - 1)
+    bit_pool = 0
+    bits_left = 0
+
+    def get_bits(n: int) -> int:
+        nonlocal in_pos, bit_pool, bits_left
+        value = 0
+        got = 0
+        while got < n:
+            if bits_left == 0:
+                if in_pos < 0x10:
+                    # Ran off the front of the body: feed zero bits, matching
+                    # the reference decoders' behaviour on truncated streams.
+                    bit_pool = 0
+                else:
+                    bit_pool = data[in_pos]
+                    in_pos -= 1
+                bits_left = 8
+            take = min(bits_left, n - got)
+            value = (value << take) | (
+                (bit_pool >> (bits_left - take)) & ((1 << take) - 1)
+            )
+            bits_left -= take
+            got += take
+        return value
+
+    out = bytearray(decomp_size)
+    oend = decomp_size - 1
+    produced = 0
 
     try:
-        while out_pos > 0 and in_pos >= 0x10:
-            flag = data[in_pos]; in_pos -= 1
-            for bit in range(8):
-                if out_pos <= 0 or in_pos < 0x10:
-                    break
-                if flag & (0x80 >> bit):
-                    if in_pos < 0x11:
+        while produced < decomp_size:
+            if get_bits(1):
+                distance = get_bits(13) + 3
+                length = 3
+                for width in _VLE_WIDTHS:
+                    chunk = get_bits(width)
+                    length += chunk
+                    if chunk != (1 << width) - 1:
                         break
-                    hi = data[in_pos]; in_pos -= 1
-                    lo = data[in_pos]; in_pos -= 1
-                    length = (hi >> 3) + 3
-                    dist   = ((hi & 0x07) << 8) | lo
-                    for _ in range(length):
-                        if out_pos <= 0:
-                            break
-                        out_pos -= 1
-                        rp = out_pos + dist + 1
-                        out[out_pos] = out[rp] if rp < decomp_size else 0
                 else:
-                    out_pos -= 1
-                    out[out_pos] = data[in_pos]; in_pos -= 1
+                    while True:
+                        chunk = get_bits(8)
+                        length += chunk
+                        if chunk != 0xFF:
+                            break
+                for _ in range(length):
+                    if produced >= decomp_size:
+                        break
+                    dst = oend - produced
+                    src = dst + distance
+                    out[dst] = out[src] if src < decomp_size else 0
+                    produced += 1
+            else:
+                out[oend - produced] = get_bits(8)
+                produced += 1
     except (IndexError, ValueError) as e:
-        logger.debug("CRILAYLA decode failed at out_pos=%d in_pos=%d: %s",
-                     out_pos, in_pos, e)
+        logger.debug("CRILAYLA decode failed at produced=%d in_pos=%d: %s",
+                     produced, in_pos, e)
         return None
 
     return bytes(prefix) + bytes(out)
