@@ -764,3 +764,63 @@ Step 3 (decisive numeric cross-check on real data): `cobKoopaCastle.bcres` 64x25
 Different. Forge names the file `tex1_64x256_592469595A7667CB_12_mip0.png`; Azahar looks up `99D5874C5F9C5F8C` and finds nothing.
 
 Proposed fix (NOT applied, awaiting go-ahead): hash exactly the mip0 surface. The clean form is to have each container parser emit an explicit `mip0_size` (or per-level offsets) and hash `tex.data[:mip0_size]` in `_handle_texture` (`extractor.py:385`), rather than the whole slice. Do NOT compute the truncation from `encoded_size(width, height, format)` in the pipeline: that is wrong for BFLIM (where width/height are display dims but the surface is the larger power-of-2 storage size, so truncating would BREAK the BFLIM textures that currently work) and for ETC odd dimensions (section 2.1 item 4). Affected parsers, in priority order: CGFX (`_v1_cgfx.py`, the primary real-world manifestation, hardcoded mip_count=1 but full-chain slice), CTPK (`_v1_ctpk.py`, latent), Shin'en TEX (`_v1_shinen_tex.py`, `data_size = len - data_offset` includes mips and trailing padding). BCH already slices mip0 only and is safe. Prerequisite: resolve the Step 2 adjacent discovery (decoded-vs-raw / use_new_hash) first, since if the pinned legacy hash truly decodes, the correct fix is to change both the pinned mode and the slice, not the slice alone.
+
+---
+
+## 2026-09-08 targeted correctness pass (tasks 1-5)
+
+Four audit findings that survived the v1 to v2 refactor unchanged, plus a README house-rule restore. Every binary-parsing change was made hex-dump-first against real ROM bytes, not from reasoning alone.
+
+### Environment reconciliation (before any code change)
+
+The task's stated setup did not match this machine, so the following was resolved and recorded up front:
+
+- Working tree is `C:\Users\Zagre\Downloads\3ds-tex-extract` (the Desktop only holds a zip whose four target files are byte-identical to this tree).
+- The reference audit was not present in-repo. Recovered from `D:\Program Files\3DS-Texture-Forge-1.1.zip` and placed at `outputs/reference/3DS-Texture-Forge-1.1/dev/audit_results.json`.
+- ROMs are under `D:\Roms\3DS\3ds-decrypted-roms321com\all` (numbers + A-H only), not `D:\3ds\`. The dumps carry plaintext RomFS (IVFC magic) but leave the NCCH NoCrypto flag unset, which trips Forge's encryption guard; a working copy with that flag set (dev_patch_nocrypto.py) was used for gating. The production crypto check was left untouched (out of scope, and correct for genuinely-encrypted input).
+- Three named gate ROMs are absent (Mario Kart 7, Persona Q, Pokemon Y). Substitutes used and noted: Dragon Ball Fusions (CRILAYLA), NSMB2 + Kirby (CGFX), Corpse Party / Bravely Default / FE Awakening (ETC1/ETC1A4 regression).
+
+### Task 1 - Level-5 Huffman child-offset (correctness)
+
+Hex-dump findings: Fantasy Life's `_file_archive.bin` is a Level-5 flat archive of 38,204 entries, all method-1 LZ. They decompress to `zmdl`/`ztex` Level-5 containers (raw PICA data with `tex\x02` sub-blocks), NOT IMGC, and contain zero method-2/3 Huffman blobs. v2 has no `ztex` parser, so it extracts 0 textures from this ROM and never calls `_decompress_huffman`. Layton's files are not recognised as archives either. No ROM reachable in this environment exercises the Level-5 Huffman path.
+
+Fix: corrected `decode_symbol` to the canonical GBATEK form `child_base = (node_off & ~1) + (node & 0x3F) * 2 + 2` (left child at child_base, right at +1). The v1 code added the offset as a byte count (not 16-bit words) and aligned on the tree-relative offset (`node_off - tree_start`), which differs because the tree starts at the odd offset 1. Both errors fixed.
+
+Gate: two hand-laid canonical-format fixtures in `tests/test_compression.py`, each isolating one sub-bug (word-multiply at the root; alignment at an odd node offset). Both round-trip through the fixed decoder and produce wrong output under the old formula. The Fantasy Life count gate could not be reproduced (0 textures, ztex unhandled - a separate, larger gap than the child-offset bug, and outside this pass's scope).
+
+### Task 2 - Level-5 Huffman performance
+
+Replaced the per-bit `struct.unpack_from` + Python-call `read_bit` with a one-shot numpy bit expansion handed to a plain Python list (list indexing beat numpy scalar indexing in a micro-benchmark). Pure-Python fallback retained for numpy-less environments.
+
+Timing (micro-benchmark, this machine): isolated bit-read loop 0.335s (orig struct) vs 0.046s (list) over 2,000,000 bits = ~7.3x. End-to-end synthetic decode with shallow 1-bit codes was 1.47x (read_bit is a smaller share when codes are short; real deeper codes gain more). The on-ROM Fantasy-Life wall-clock gate is outstanding because no reachable ROM exercises the path.
+
+### Task 3 - CRILAYLA is the wrong algorithm (correctness)
+
+Hex-dump findings: 7th Dragon III's RomFS is a single 1.65 GB CPK with zero CRILAYLA entries (uncompressed). Dragon Ball Fusions has 6,494 CRILAYLA entries; a real entry (decomp=68, comp=32, +0x100 raw header) was dumped and its original file starts with `jMOT`.
+
+Fix: replaced the fixed 2-byte backref decode with the real algorithm - an MSB-first bitstream read backward from the body end, a 13-bit distance (+3), and a variable-length length assembled from 2/3/5/8-bit chunks (each all-ones chunk means read the next wider chunk and keep adding; base 3). Verified byte-exact against the real entry and cross-checked two independent reference ports over 500 real DBF entries (0 mismatches). `_cpk_v1._decompress_crilayla` now delegates to the shared codec so the two copies cannot drift. `tests/test_crilayla.py` rewritten: real DBF fixture with known-good output (`tests/fixtures/crilayla_dbf_*.bin`), a both-copies-agree assertion, and human-auditable synthetic backref streams.
+
+Gate: Dragon Ball Fusions extracts 1,235 textures via 2,427 successful CRILAYLA decompressions (0 failures), output magics jMDL/jMOT/jIMG/JGCL. Previously the CPK content decoded to garbage (~0). Persona Q (the named gate) is absent; DBF uses the same CRI CPK + CRILAYLA path.
+
+### Task 4 - CGFX mip0 slice for the Azahar hash (correctness)
+
+Fix at `extractor.py` `_handle_texture`: hash `tex.data[:width*height*bpp//8]` (bpp from `FORMAT_BPP`) instead of the whole buffer, falling back to the whole buffer if the computed size is implausible or exceeds the data. The BFLIM regression the earlier audit warned about does not materialise here: `_v1_bflim.py` emits storage (power-of-2) dims as width/height, so `width*height*bpp//8` equals `len(tex.data)` for BFLIM and the slice is a no-op. dedup, raw_data_size, and the PNG decode still use the full buffer.
+
+Gate: NSMB2 (000400000007AE00) - 39 mipped CGFX textures now hash mip0 only; all 2,785 single-surface textures hash identically to before. The cobKoopaCastle.bcres 64x256 ETC1 texture now hashes to 99D5874C5F9C5F8C, the value this document's own reverse-engineering identified as Azahar's runtime lookup (was 592469595A7667CB). The emulator drop-in confirmation is the one step that requires Azahar itself; the hash now equals the reverse-engineered target. Root-cause CGFX parser cleanup (report real mip0_size / mip_count) deferred.
+
+### Task 5 - README house-rule sections
+
+Restored the 'A note on how this was built' blockquote and the 'Why this exists' AYN Thor section verbatim from the published GitHub README (raw main branch), placed above the '3DS Texture Forge 2.0' heading. Status block corrected: CRILAYLA is now a correct codec (accurate check), the CPK path shares that codec, the Level-5 Huffman and Azahar mip0 fixes are listed, and the deferred items are marked honestly. Removed the one pre-existing em dash on the title line.
+
+### Regression gate (final)
+
+- pytest: 112 passed (was 106; +2 Huffman, +3 CRILAYLA net, +1 azahar mip0).
+- Counts vs reference audit (list_only find counts; small positive skew is expected since these are pre-decode finds):
+  - Corpse Party: 2,786 vs 2,656 (+4.9%)
+  - Bravely Default: 11,958 vs 11,908 (+0.4%)
+  - Fire Emblem Awakening: 10,269 vs 10,295 (-0.3%)
+  - Dragon Ball Fusions (CRILAYLA gate): 1,235 (no reference row; was ~0 pre-fix)
+  - NSMB2 (azahar gate): 2,824 textures, 39 mipped hashes corrected, 2,785 unchanged
+- Fantasy Life remains 0 in v2 (unhandled ztex container). This predates and is unrelated to this pass; flagged here as the biggest single gap for a future task.
+
+Deferred: (a) CGFX parser reporting real mip0_size/mip_count; (b) on-ROM Level-5 Huffman wall-clock gate (no Huffman-bearing ROM reachable); (c) ztex/zmdl texture support (blocks Fantasy Life's ~10,254).
