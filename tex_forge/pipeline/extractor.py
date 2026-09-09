@@ -364,7 +364,7 @@ class ExtractionPipeline:
         source_content: str = "",
     ) -> tuple[bool, bool]:
         """Process one Texture. Returns (ok, was_suspicious)."""
-        from tex_forge.textures.formats import name as fmt_name
+        from tex_forge.textures.formats import name as fmt_name, FORMAT_BPP
         from tex_forge.textures.azahar_hash import azahar_hash_hex
 
         tex_id = f"tex_{tex_idx:04d}"
@@ -382,7 +382,22 @@ class ExtractionPipeline:
         # Azahar runtime lookup hash (CityHash64 of the raw GPU bytes).
         # Computed once and attached to the manifest in both code paths
         # below, so build-pack can produce drop-in packs offline.
-        azahar_h = azahar_hash_hex(tex.data) or ""
+        #
+        # Azahar hashes the mip0 surface ONLY. For a CGFX texture carrying a
+        # mip chain, tex.data is the full concatenated mip0..mipN payload (the
+        # CGFX parser reports the whole data_size and hardcodes mip_count=1), so
+        # hashing all of it never matches. Slice to the mip0 surface first:
+        # width * height * bpp / 8. 3DS dimensions are multiples of 8 and the
+        # parsers emit storage (padded) dims, so this equals len(tex.data) for
+        # single-surface textures (BFLIM/CTPK/etc. -- a no-op) and trims the
+        # trailing mips only for mipped payloads. Fall back to the whole buffer
+        # if the computed size is implausible or exceeds the data we actually
+        # have.
+        _bpp = FORMAT_BPP.get(int(tex.format), 0)
+        _mip0_size = (tex.width * tex.height * _bpp) // 8
+        _hash_src = (tex.data[:_mip0_size]
+                     if 0 < _mip0_size <= len(tex.data) else tex.data)
+        azahar_h = azahar_hash_hex(_hash_src) or ""
 
         # list_only: record what was found, skip decode / quality / PNG.
         if self.options.list_only:

@@ -139,6 +139,51 @@ def test_cancel_event_stops_run_and_marks_summary(patched):
         assert os.path.exists(os.path.join(td, "manifest.json"))
 
 
+def test_azahar_hash_covers_mip0_only_for_mipped_texture(monkeypatch):
+    """A mipped payload (data longer than the mip0 surface) must be hashed over
+    the mip0 slice only; a single-surface texture must hash the whole buffer."""
+    from tex_forge.textures.azahar_hash import azahar_hash_hex, is_available
+
+    if not is_available():
+        pytest.skip("no CityHash64 backend")
+
+    # ETC1 is 4 bpp: mip0 for 64x64 = 64*64*4/8 = 2048 bytes. Append a fake mip
+    # chain so tex.data is longer than mip0 (mirrors CGFX mip0..mipN payloads).
+    mip0 = bytes((i * 7) & 0xFF for i in range(2048))
+    mipped_data = mip0 + bytes((i * 3) & 0xFF for i in range(700))
+    # RGBA8 is 32 bpp: 8x8 = 256 bytes, exactly one surface (no mips).
+    single_data = _blob(0x10)  # 64 * 4 = 256 bytes
+
+    monkeypatch.setattr(extractor, "RomFSParser", _OneFileRomFS)
+    monkeypatch.setattr(extractor, "smash_virtual_entries", lambda f, d: {})
+    monkeypatch.setattr(extractor, "build_texturebin_index", lambda f: {})
+
+    def fake_extract(file_data, file_path, title_id="", scan_all=False):
+        yield Texture(name="mipped", width=64, height=64,
+                      format=int(PicaFormat.ETC1), data=mipped_data,
+                      parser_used="cgfx", source_file=file_path)
+        yield Texture(name="single", width=8, height=8,
+                      format=int(PicaFormat.RGBA8), data=single_data,
+                      parser_used="ctpk", source_file=file_path)
+
+    monkeypatch.setattr(extractor, "extract_textures", fake_extract)
+
+    with tempfile.TemporaryDirectory() as td:
+        pipe, _ = _run(td, list_only=True)
+        recs = list(pipe.records)
+        mipped_rec = next(r for r in recs if r["width"] == 64)
+        single_rec = next(r for r in recs if r["width"] == 8)
+
+        # mipped: hash is over mip0 (2048), NOT the full 2748-byte buffer
+        assert mipped_rec["azahar_hash_cityhash64"] == azahar_hash_hex(mip0)
+        assert mipped_rec["azahar_hash_cityhash64"] != azahar_hash_hex(mipped_data)
+        # but the recorded raw size is still the whole buffer
+        assert mipped_rec["raw_data_size"] == len(mipped_data)
+
+        # single surface: unchanged, whole buffer hashed
+        assert single_rec["azahar_hash_cityhash64"] == azahar_hash_hex(single_data)
+
+
 def test_filter_tail_peek_catches_bflim_footer():
     f = FileFilter()
     # extensionless path outside any texture dir: only magic can save it
