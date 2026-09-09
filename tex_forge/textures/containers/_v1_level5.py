@@ -11,6 +11,11 @@ import struct
 import logging
 from typing import Optional, List, Dict, Any
 
+try:
+    import numpy as _np
+except ImportError:  # pragma: no cover - numpy is a hard dep in practice
+    _np = None
+
 logger = logging.getLogger(__name__)
 
 IMGC_MAGIC = b'IMGC'
@@ -118,8 +123,35 @@ def _decompress_huffman(data: bytes, dec_size: int, bits: int = 4) -> Optional[b
     bit_pos = 0
     data_len = len(data)
 
+    # Hot-path optimisation: the v1 decoder did a struct.unpack_from plus a
+    # Python function call for *every bit of every symbol*, which dominated
+    # runtime on large Level-5 archives. Pre-expand the whole bitstream into a
+    # flat numpy array of bits once (MSB-first within each 32-bit LE word, the
+    # same order read_bit consumed them), then index it. Falls back to the pure
+    # -Python per-bit reader when numpy is unavailable. See docs/CODE_OVERVIEW.md.
+    bit_list = None
+    if _np is not None:
+        n_words = (data_len - bitstream_off) // 4
+        if n_words > 0:
+            words = _np.frombuffer(data, dtype='<u4',
+                                   count=n_words, offset=bitstream_off)
+            shifts = _np.arange(31, -1, -1, dtype=_np.uint32)
+            # Vectorised bit expansion, then hand off to a plain Python list:
+            # sequential scalar indexing of a list is markedly faster than
+            # indexing a numpy array element-by-element in the tree walk.
+            bit_list = (((words[:, None] >> shifts) & 1)
+                        .astype(_np.uint8).ravel().tolist())
+    n_bits = 0 if bit_list is None else len(bit_list)
+
     def read_bit():
         nonlocal bit_pos
+        if bit_list is not None:
+            if bit_pos < n_bits:
+                b = bit_list[bit_pos]
+                bit_pos += 1
+                return b
+            bit_pos += 1
+            return 0
         word_idx = bit_pos >> 5
         byte_off = bitstream_off + word_idx * 4
         if byte_off + 4 > data_len:
@@ -131,16 +163,30 @@ def _decompress_huffman(data: bytes, dec_size: int, bits: int = 4) -> Optional[b
         return (word >> bit_in_word) & 1
 
     def decode_symbol():
-        """Walk tree from root, return leaf value."""
-        # Root is at tree[tree_start]
-        node_off = tree_start  # byte offset in data[]
+        """Walk tree from root, return leaf value.
+
+        Canonical Nintendo/GBATEK Huffman node layout: each node's low 6 bits
+        are an offset to its child *pair*, counted in 16-bit words, and the
+        alignment base is the node's own absolute byte offset. So:
+
+            child_base = (node_off & ~1) + (node & 0x3F) * 2 + 2
+
+        with the left child at child_base and the right child at child_base+1.
+        The previous code added the offset as a byte count (not words) and
+        aligned on the tree-relative offset (node_off - tree_start), which
+        differs here because the tree starts at the odd offset 1 (byte 0 is the
+        tree-size byte). Both errors are fixed below.
+        """
+        # Root is at data[tree_start] (byte 0 is the tree-size byte).
+        node_off = tree_start  # absolute byte offset in data[]
         for _ in range(64):
             if node_off >= tree_end:
                 return None
             node = data[node_off]
             child_rel = node & 0x3F
-            # Child pair base: relative offset in bytes from aligned position
-            child_base = ((node_off - tree_start) & ~1) + tree_start + child_rel + 2
+            # Child pair base: word-counted offset from the node's aligned
+            # absolute offset.
+            child_base = (node_off & ~1) + child_rel * 2 + 2
 
             b = read_bit()
             if b == 0:

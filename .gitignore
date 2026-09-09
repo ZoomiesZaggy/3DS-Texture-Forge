@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+/dev_*.py
+/dev_*.bin
+/output/
+/outputs/**/output/
+C:/temp/
