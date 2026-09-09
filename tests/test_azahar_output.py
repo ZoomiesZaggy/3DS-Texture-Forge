@@ -33,6 +33,23 @@ def _rgba8_8x8(fill: int) -> bytes:
     return b"".join(bytes([fill, (i * 7) & 0xFF, 0x33, 0xFF]) for i in range(64))
 
 
+# ── CityHash64 is standard, not a project-specific variant ───────────────────
+
+def test_pure_cityhash_matches_independent_native():
+    """The bundled pure-Python CityHash64 must equal an independent CityHash64
+    implementation, so the Azahar filename hashes are real standard CityHash64
+    values and not something only this tool would produce. Skips when the native
+    `cityhash` C extension is not installed."""
+    native = pytest.importorskip("cityhash").CityHash64
+    from tex_forge.textures._cityhash_pure import CityHash64 as pure
+
+    # Varied lengths incl. an 8192-byte block (a 64x256 ETC1 mip0 surface size),
+    # crossing CityHash64's internal <=16 / <=32 / <=64 / >64 code paths.
+    for data in (b"", b"a", b"abc", b"cobKoopaCastle", bytes(range(256)) * 4,
+                 bytes((i * 37) & 0xFF for i in range(8192))):
+        assert pure(data) == native(data), f"mismatch at len {len(data)}"
+
+
 # ── azahar_filename shape ────────────────────────────────────────────────────
 
 def test_azahar_filename_shape():

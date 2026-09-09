@@ -855,3 +855,23 @@ Important correction to the pass-1 and task-2A premise: **Fantasy Life does NOT 
 ### Task 3: independent Huffman cross-check
 
 The two canonical fixtures (HUFF8_BLOB / HUFF4_BLOB in tests/test_compression.py, reused as module constants) were decoded with a decompressor written fresh from the GBATEK BIOS HuffUnComp spec, without reading _v1_level5.py (ndspy ships no Huffman codec, so the from-spec option was used). The independent decoder uses a stateless index-based bit reader and a fresh node walk, structured differently from the shipped stateful read_bit / decode_symbol. Result: byte-identical to the shipped decoder AND to the hand-derived expected outputs (b"AB", b"\x21") on both fixtures. No disagreement, so no decoder change needed. Added as `test_huffman_fixtures_match_independent_gbatek_decoder`.
+
+### Task 4: Azahar target hash provenance (verification)
+
+`git log -S 99D5874C5F9C5F8C` shows the target first appears in commit `7f0a5ea` (the baseline snapshot of the pre-existing v2 tree), inside `docs/CODE_OVERVIEW.md`'s 2026-07-01 audit (the "Finding 1 CONFIRMED" section, lines ~707 and ~762). It does NOT appear in the v1 reference audit (`outputs/reference/3DS-Texture-Forge-1.1/dev/audit_results.json`) or anywhere in the v1 tree. So it predates the mip0 fix, but its origin is this project's own audit, where it was computed by running CityHash64 over the mip0 slice. That is the circular case the task warns about: both the audit value and the fix are "CityHash64 of the first 8192 bytes," so their agreement does not by itself prove Azahar looks up that value.
+
+Independent derivation (hex-dump-first): dumped cobKoopaCastle.bcres (64x256 ETC1) from NSMB2, full data 10752 bytes, mip0 size = 64*256*4/8 = 8192. Hashed with the native `cityhash` C extension (an implementation independent of this repo's `_cityhash_pure.py`):
+- full 10752 bytes -> `592469595A7667CB` (matches the audit "full buffer" value)
+- mip0 8192 bytes  -> `99D5874C5F9C5F8C` (matches the audit "mip0" target)
+The bundled pure-Python CityHash64 agrees with the native module byte-for-byte (also locked by a new test, `test_pure_cityhash_matches_independent_native`, skipped when the native module is absent).
+
+Conclusion (honest, partial): the target is genuinely standard CityHash64 of the mip0 surface, independently reproduced. So the hash function and the byte-range arithmetic (mip0 = width*height*bpp/8) are confirmed and NOT circular. What remains unconfirmed is that Azahar's runtime actually keys custom-texture lookups on CityHash64(mip0-surface) for a mipped CGFX texture: that claim rests on this project's reverse-engineering of Azahar's `ComputeHash`, and could not be verified here against Azahar source or an in-emulator load test. The Status block and README now mark the Azahar mip0 row 🟡: hash math verified, end-to-end emulator match deferred pending an in-emulator load test. This is the honest outcome of the 45-minute box (the CityHash64 value was independently derivable; Azahar's own behaviour was not, without the emulator).
+
+### Pass 2 summary
+
+- FL verdict: Case A regression. v1 = 10,254, v2 = 0 on the same file; fixed in `l5_flat.py` (decompress entries, scan first 0x1000 for CGFX/BCH/CTPK/CTXB). v2 now = 10,254, 45.3s.
+- FL Huffman wall-clock: not applicable. Instrumentation shows Fantasy Life makes 0 Level-5 Huffman calls (LZ11 + CGFX), so the on-ROM Huffman timing gate is still outstanding; no reachable ROM exercises it.
+- Huffman cross-check: independent from-GBATEK decoder agrees byte-for-byte with the shipped decoder and the hand-derived expected outputs on both fixtures.
+- Azahar provenance: target `99D5874C5F9C5F8C` predates the fix but came from this project's own audit computed with its own hasher; independently reproduced as CityHash64(mip0 8192 bytes) with the native cityhash module. Azahar's actual lookup behaviour remains unconfirmed pending an in-emulator load test.
+- Regression (list-mode find counts vs reference): Corpse Party 2,786 vs 2,656 (+4.9%), Bravely Default 11,958 vs 11,908 (+0.4%), Fantasy Life 10,254 vs 10,254 (0%). pytest 117 passed. No drops.
+- Substitutions this pass: none new (Fantasy Life was present at `D:\Roms\3DS\3ds-decrypted-roms321com\all`, not `D:\3ds\`). Deferrals: on-ROM Huffman gate (no Huffman-bearing ROM), CGFX parser mip metadata, Azahar in-emulator load test.

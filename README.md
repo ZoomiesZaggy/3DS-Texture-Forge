@@ -220,8 +220,9 @@ staging mode, and pipeline graceful-failure paths, multi-content CIA chunk-recor
 - ✅ All compressors from v1 ported (LZ10/11/13, BLZ, Yaz0, zlib, gzip-prefix), plus a correct variable-length **CRILAYLA** codec (real 13-bit-distance + 2/3/5/8-bit length encoding, verified byte-exact against real CPK entries) and the **Level-5 method-byte wrapper**
 - ✅ All archive parsers from v1 ported (12 plugins; the CPK path now calls the shared CRILAYLA codec instead of a separate vendored copy, so the two cannot drift)
 - ✅ All texture container parsers from v1 ported (12 plugins; BCH/CGFX/CTPK/CTXB/CMB/BFLIM/jIMG/Shinen/STEX/Capcom-TEX/GDB1/IMGC)
-- ✅ Level-5 Huffman child-offset corrected (byte-vs-word + alignment base) and moved off the pure-Python per-bit path (numpy bit pre-expansion, python fallback retained)
-- ✅ Azahar lookup hash now covers the mip0 surface only, so mipped CGFX packs match the emulator's runtime hash (single-surface textures are unchanged)
+- ✅ Level-5 flat archive (Fantasy Life) restored: entries are LZ-decompressed and scanned for the CGFX/BCH/CTPK/CTXB container embedded behind the resource header. Fantasy Life extracts 10,254 textures again (matches the v1 reference exactly)
+- ✅ Level-5 Huffman child-offset corrected (byte-vs-word + alignment base) and moved off the pure-Python per-bit path (numpy bit pre-expansion, python fallback retained). Cross-checked byte-for-byte against an independent from-GBATEK-spec decoder. Note: no reachable ROM exercises this path (Fantasy Life uses LZ11 + CGFX, not Huffman), so it has no on-ROM validation yet
+- 🟡 Azahar lookup hash now covers the mip0 surface only. The emitted hash equals CityHash64 of the mip0 surface (independently reproduced with the native `cityhash` C extension: cobKoopaCastle 64x256 ETC1 mip0 = `99D5874C5F9C5F8C`). That CityHash64-of-mip0 is what the code audit identifies as Azahar's lookup key, but the end-to-end emulator match is unconfirmed pending an in-emulator load test. Single-surface textures are unchanged
 - ✅ CLI parity with v1: `extract`, `scan`, `report`, `build-pack`, `import-dump`
 - ✅ Multi-content CIA extraction: `extract` walks content 0 + update/DLC CFAs, tags each manifest record with `source_content`, shares dedup across contents; the GUI (scan + extract) is multi-content aware too
 - ✅ GUI uses the new pipeline (vendored v1 UI for now)
@@ -230,6 +231,7 @@ staging mode, and pipeline graceful-failure paths, multi-content CIA chunk-recor
 - ✅ Contact sheet generator
 - ✅ Pack builder (azahar / mapped / staging). Azahar packs are drop-in: `tex1_<W>x<H>_<CityHash64>_<code>_mip0.png` filenames + a minimal `pack.json` pinning `use_new_hash: false` (legacy hash); Forge's own metadata lives in `forge_pack_meta.json` so it never collides with Azahar's pack config
 - 🔧 Deferred: teaching the CGFX parser to report the real `mip0_size` / `mip_count` so the manifest is honest (the Azahar hash-site slice is the correct fix in the meantime)
-- 🔧 Deferred gate: the Level-5 Huffman correctness and perf changes are unit-tested against canonical fixtures, but no ROM reachable in the current environment exercises the Level-5 Huffman path, so the on-ROM wall-clock gate is outstanding (see `docs/CODE_OVERVIEW.md`)
+- 🔧 Deferred gate: the Level-5 Huffman correctness and perf changes are unit-tested against canonical fixtures and an independent decoder, but no reachable ROM exercises the path (a full Fantasy Life extraction was instrumented and made 0 Huffman calls), so the on-ROM wall-clock gate is still outstanding (see `docs/CODE_OVERVIEW.md`)
+- 🟡 Deferred confirmation: the Azahar mip0 hash matches Azahar in-emulator (drop the pack in and confirm the previously-missing textures load); the hash math is independently verified but the emulator round-trip is not
 
 The reference v1 codebase still lives at `outputs/reference/3DS-Texture-Forge-1.1/`.
