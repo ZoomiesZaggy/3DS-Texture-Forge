@@ -837,3 +837,17 @@ ROM: `D:\Roms\3DS\3ds-decrypted-roms321com\all\Fantasy Life (USA) Decrypted.3ds`
 - v2 current tree: **0** textures, files scanned 2, 46.8s.
 
 Both scan the same 2 files (`_file_archive.bin` is the payload) and both recognize 2 containers, so file scanning and archive detection are NOT the regression. The loss is downstream: v1 turns the Level-5 flat archive entries into 10,254 textures and v2 turns them into nothing. This is a genuine regression in the Level-5 flat / IMGC extraction path, not a missing brand-new container. Proceeding to task 2A. (The earlier "missing ztex/zmdl support" note from pass 1 was wrong: v1 never needed a ztex parser either, yet extracted 10,254 from the same bytes.)
+
+### Task 2A: Level-5 flat regression fixed
+
+Root cause (hex-dump confirmed): Fantasy Life's `_file_archive.bin` is a Level-5 flat archive of ~38,204 entries. Texture-bearing entries (from ~index 4208) are raw Nintendo LZ11 streams (lead byte 0x11) that decompress to 300-450 KB Level-5 resource buffers with a real CGFX container embedded at offset 0x100 or 0x180 (within the first 0x1000 bytes). v1's `_extract_l5_flat` (reference `textures/scanner.py`) LZ-decompressed each entry and scanned the first 0x1000 bytes for CGFX/BCH/CTPK/CTXB. The v2 refactor turned l5_flat into a plain archive plugin that yields raw entries and relies on the generic scanner; the generic scanner decompresses correctly (verified: entry 4210 -> 377,476 bytes, CGFX at 0x180) but only probes for embedded magics under `--scan-all`, so the containers were never found and Fantasy Life produced 0.
+
+Dumps that pinned this down:
+- entry 4210 lead bytes `11 84 c2 05 ...`; v2 classify = `compressed:lz_nintendo_lz11`; try_decompress -> 377,476 bytes; CGFX at 0x180; v2 `extract_textures` on the entry -> 0.
+- (Aside: `decompress_l5` mis-parses these because it reads a 4-byte Level-5 method header and dispatches `0x11 & 7 = 1` to the LZ10 decoder, truncating the output. The scanner does not use it here; it uses `lz_nintendo` correctly. Left unchanged.)
+
+Fix: `tex_forge/archives/l5_flat.py` now decompresses each entry (raw LZ when the lead byte is 0x10/0x11/0x13) and yields the texture container found at offset 0 or embedded within the first 0x1000 bytes, matching v1's exact magic set (CGFX/BCH/CTPK/CTXB). The generic texture dispatch handles it from there. Added three unit tests (`tests/test_archives.py`) covering compressed-embedded, direct-uncompressed, and non-texture entries.
+
+Acceptance: Fantasy Life now extracts **10,254** textures (v1 reference 10,254; reference audit 10,254), format distribution ETC1 7626 / ETC1A4 1976 / RGBA8 632 / A8 20 - byte-for-byte the reference audit row. Wall-clock 45.3s (list mode).
+
+Important correction to the pass-1 and task-2A premise: **Fantasy Life does NOT exercise the Level-5 Huffman path.** Instrumenting `_decompress_huffman` across the full FL extraction shows 0 calls. FL entries are LZ11-compressed and its textures are CGFX; the Level-5 Huffman method (method nibble 2/3 in the 4-byte header) is used by IMGC tilemap/pixel blobs and some other Level-5 titles, not this game. So restoring FL does NOT retroactively validate the child-offset fix, and the on-ROM Huffman wall-clock gate is still outstanding (no reachable ROM exercises it). Task 3's independent cross-check is therefore the real validation of the Huffman math.
