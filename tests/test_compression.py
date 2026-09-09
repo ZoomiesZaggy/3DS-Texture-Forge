@@ -64,42 +64,115 @@ def _l5_huffman_blob(method_nibble, dec_size, body):
     return struct.pack("<I", (dec_size << 3) | method_nibble) + body
 
 
+# Fixture 1: 8-bit Huffman, root child pair placed at word-offset 2 (rel=2).
+#   [0]=3   tree-size byte -> (3+1)*2 = 8 tree bytes
+#   [1]=0xC2 root: left leaf | right leaf | rel=2
+#   [6]=0x41 'A' left child  (child_base = (1&~1)+2*2+2 = 6)
+#   [7]=0x42 'B' right child (child_base+1 = 7)
+#   bitstream @ offset 12 = 0x40000000 LE -> first two bits 0,1
+# Decodes to 'A' (bit 0 -> left leaf) then 'B' (bit 1 -> right leaf). Under the
+# old byte-count formula the root child_base is 5, landing on padding, so this
+# isolates the word-multiply fix.
+HUFF8_BLOB = _l5_huffman_blob(
+    3, 2,
+    bytes([3, 0xC2, 0, 0, 0, 0, 0x41, 0x42, 0, 0, 0, 0])
+    + bytes([0x00, 0x00, 0x00, 0x40]))
+HUFF8_EXPECT = b"AB"
+
+# Fixture 2: 4-bit Huffman, two-level tree with an internal node at odd offset 3.
+#   [0]=2   tree-size byte -> (2+1)*2 = 6 tree bytes
+#   [1]=0x80 root: left leaf(P) | right internal(N1) | rel=0
+#   [2]=0x01 'P' nibble  (root child_base = 2)
+#   [3]=0xC0 N1: left leaf(Q) | right leaf(R) | rel=0
+#   [4]=0x02 'Q' nibble  (N1 child_base = (3&~1)+0+2 = 4)
+#   [5]=0x03 'R' nibble
+#   bitstream @ offset 8 = 0x40000000 LE -> bits 0,1,0
+# Codes P=0, Q=10, R=11. First nibble P(0x1) then Q(0x2) assemble to output byte
+# (hi<<4)|lo = 0x21. Under the old formula N1's child_base is 5, landing on R,
+# so this isolates the alignment-base fix.
+HUFF4_BLOB = _l5_huffman_blob(
+    2, 1,
+    bytes([2, 0x80, 0x01, 0xC0, 0x02, 0x03, 0, 0])
+    + bytes([0x00, 0x00, 0x00, 0x40]))
+HUFF4_EXPECT = b"\x21"
+
+
 def test_huffman8_root_word_offset():
-    """8-bit Huffman, root child pair placed at word-offset 2 (rel=2).
-
-    Layout (byte offsets into the body, [0] is the tree-size byte):
-        [0]=3   tree-size byte -> (3+1)*2 = 8 tree bytes
-        [1]=0xC2  root: left leaf | right leaf | rel=2
-        [6]=0x41 'A'  left child   (child_base = (1&~1)+2*2+2 = 6)
-        [7]=0x42 'B'  right child  (child_base+1 = 7)
-        bitstream @ offset 12 = 0x40000000 LE -> first two bits 0,1
-
-    Decodes to 'A' (bit 0 -> left leaf) then 'B' (bit 1 -> right leaf).
-    Under the old byte-count formula the root child_base is 5, landing on
-    padding, so this fixture isolates the word-multiply fix.
-    """
-    body = bytes([3, 0xC2, 0, 0, 0, 0, 0x41, 0x42, 0, 0, 0, 0]) + \
-        bytes([0x00, 0x00, 0x00, 0x40])
-    assert decompress_l5(_l5_huffman_blob(3, 2, body)) == b"AB"
+    assert decompress_l5(HUFF8_BLOB) == HUFF8_EXPECT
 
 
 def test_huffman4_odd_node_alignment():
-    """4-bit Huffman, two-level tree with an internal node at odd offset 3.
+    assert decompress_l5(HUFF4_BLOB) == HUFF4_EXPECT
 
-    Layout:
-        [0]=2   tree-size byte -> (2+1)*2 = 6 tree bytes
-        [1]=0x80 root: left leaf(P) | right internal(N1) | rel=0
-        [2]=0x01 'P' nibble   (root child_base = 2)
-        [3]=0xC0 N1: left leaf(Q) | right leaf(R) | rel=0
-        [4]=0x02 'Q' nibble   (N1 child_base = (3&~1)+0+2 = 4)
-        [5]=0x03 'R' nibble
-        bitstream @ offset 8 = 0x40000000 LE -> bits 0,1,0
 
-    Codes: P=0, Q=10, R=11. First nibble P(0x1) then Q(0x2) assemble to the
-    output byte (hi<<4)|lo = 0x21. Under the old formula N1's child_base is 5
-    (aligned on the tree-relative offset), landing on R, so this fixture
-    isolates the alignment-base fix.
-    """
-    body = bytes([2, 0x80, 0x01, 0xC0, 0x02, 0x03, 0, 0]) + \
-        bytes([0x00, 0x00, 0x00, 0x40])
-    assert decompress_l5(_l5_huffman_blob(2, 1, body)) == b"\x21"
+# ── Independent cross-check against a from-GBATEK-spec decoder ────────────────
+#
+# The two fixtures above are canonical trees this project authored. To rule out
+# a shared blind spot (the same treatment CRILAYLA got with two independent
+# ports), decode them with a Huffman decompressor written fresh from the GBATEK
+# BIOS HuffUnComp spec, WITHOUT reading _v1_level5.py. ndspy has no Huffman
+# codec, so this is the from-spec option the task allows. It is deliberately
+# structured differently from the shipped decoder: a stateless index-based bit
+# reader `bit_at(k)` and a fresh node walk, rather than the shipped stateful
+# read_bit / decode_symbol.
+#
+# GBATEK reference (BIOS HuffUnComp): the tree starts with a size byte; the root
+# node is the byte right after it. For a node at absolute offset `pos`,
+#   next = (pos & ~1) + (node & 0x3F) * 2 + 2
+# with the left child at `next` (a data node when bit 0x80 is set) and the right
+# child at `next + 1` (a data node when bit 0x40 is set). The bitstream is a run
+# of 32-bit little-endian words consumed most-significant-bit first. 4-bit mode
+# emits two symbols per output byte, first symbol in the low nibble.
+
+def _gbatek_huffman_decode(blob: bytes) -> bytes:
+    val = int.from_bytes(blob[0:4], "little")
+    method = val & 7
+    bit_width = 4 if method == 2 else 8  # L5 method 2 = 4-bit, 3 = 8-bit
+    out_size = val >> 3
+    tree = blob[4:]                      # tree[0] = size byte, tree[1] = root
+
+    tree_size = tree[0]
+    bit_start = (1 + (tree_size + 1) * 2 + 3) & ~3
+
+    def bit_at(k: int) -> int:
+        base = bit_start + (k >> 5) * 4
+        word = int.from_bytes(tree[base:base + 4], "little")
+        return (word >> (31 - (k & 31))) & 1
+
+    counter = [0]
+
+    def decode_symbol() -> int:
+        pos = 1  # root node
+        while True:
+            node = tree[pos]
+            nxt = (pos & ~1) + (node & 0x3F) * 2 + 2
+            b = bit_at(counter[0])
+            counter[0] += 1
+            if b == 0:
+                if node & 0x80:
+                    return tree[nxt]
+                pos = nxt
+            else:
+                if node & 0x40:
+                    return tree[nxt + 1]
+                pos = nxt + 1
+
+    out = bytearray()
+    while len(out) < out_size:
+        if bit_width == 8:
+            out.append(decode_symbol() & 0xFF)
+        else:
+            lo = decode_symbol() & 0xF
+            hi = decode_symbol() & 0xF
+            out.append((hi << 4) | lo)
+    return bytes(out[:out_size])
+
+
+def test_huffman_fixtures_match_independent_gbatek_decoder():
+    """Both fixtures decode identically under the shipped decoder and a fresh
+    from-GBATEK-spec decoder, and both equal the hand-derived expected output."""
+    for blob, expect in ((HUFF8_BLOB, HUFF8_EXPECT), (HUFF4_BLOB, HUFF4_EXPECT)):
+        shipped = decompress_l5(blob)
+        independent = _gbatek_huffman_decode(blob)
+        assert independent == expect
+        assert shipped == independent
