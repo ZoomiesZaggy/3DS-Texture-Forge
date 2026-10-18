@@ -63,3 +63,21 @@ def test_python_path_for_tiny_textures():
     from tex_forge.textures.decoder.pica_python import decode_python
     out = decode_python(b"\x00" * 16, 2, 2, int(PicaFormat.RGBA8))
     assert out is not None and out.shape == (2, 2, 4)
+
+
+def test_dimension_cap_rejects_huge_surfaces():
+    from tex_forge.textures.decoder.dispatch import MAX_TEXTURE_DIMENSION
+    assert decode(b"\x00" * 64, MAX_TEXTURE_DIMENSION + 1, 8, int(PicaFormat.L8)) is None
+    assert decode(b"\x00" * 64, 8, MAX_TEXTURE_DIMENSION + 1, int(PicaFormat.L8)) is None
+    # The limit itself is still accepted.
+    out = decode(b"\x00" * 64, 8, 8, int(PicaFormat.L8))
+    assert out is not None and out.shape == (8, 8, 4)
+
+
+def test_truncated_texture_warns_and_still_decodes(caplog):
+    import logging
+    caplog.set_level(logging.WARNING)
+    # 8x8 L8 needs 64 bytes; pass a short buffer.
+    out = decode(b"\x11" * 4, 8, 8, int(PicaFormat.L8))
+    assert out is not None and out.shape == (8, 8, 4)
+    assert any("short" in rec.message for rec in caplog.records)

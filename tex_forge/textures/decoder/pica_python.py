@@ -14,12 +14,15 @@ Same format references as pica_numpy.py.
 
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 import numpy as np
 
-from tex_forge.textures.formats import PicaFormat, resolve
+from tex_forge.textures.formats import PicaFormat, encoded_size, resolve
 from tex_forge.textures.morton import MORTON_TABLE
+
+logger = logging.getLogger(__name__)
 
 
 # Pre-compute inverse morton table once.
@@ -283,10 +286,48 @@ def _decode_etc1a4(data: bytes, width: int, height: int) -> np.ndarray:
 # Public dispatch
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _bytes_for_visible_pixels(width: int, height: int, f: PicaFormat) -> int:
+    """Byte count covering every in-bounds texel, including ETC block padding.
+
+    Tile-aligned sizes match ``encoded_size``. Smaller images only need the
+    texels that land inside the rectangle (a 2x2 RGBA8 is 16 bytes, not a
+    full 8x8 tile), so a tight buffer is not treated as truncated.
+    """
+    if f in (PicaFormat.ETC1, PicaFormat.ETC1A4):
+        return encoded_size(width, height, int(f))
+    spec = _PIXEL_DECODERS.get(f)
+    if f in (PicaFormat.L4, PicaFormat.A4):
+        bpp_num, bpp_den = 4, 8
+    elif spec is not None:
+        bpp_num, bpp_den = spec[1] * 8, 8
+    else:
+        return 0
+    tiles_x = (width + 7) // 8
+    max_index = 0
+    for ty in range((height + 7) // 8):
+        for tx in range(tiles_x):
+            base = (ty * tiles_x + tx) * 64
+            for m in range(64):
+                lx, ly = _INV_MORTON[m]
+                if tx * 8 + lx < width and ty * 8 + ly < height:
+                    idx = base + m
+                    if idx > max_index:
+                        max_index = idx
+    if bpp_num < 8:
+        return (max_index * bpp_num) // 8 + 1
+    return (max_index + 1) * (bpp_num // 8)
+
+
 def decode_python(data: bytes, width: int, height: int, fmt: int) -> Optional[np.ndarray]:
     f = resolve(fmt)
     if f is None or width <= 0 or height <= 0:
         return None
+    needed = _bytes_for_visible_pixels(width, height, f)
+    if needed and len(data) < needed:
+        logger.warning(
+            "texture data is short (%d bytes, %s %dx%d needs %d); missing texels stay zero",
+            len(data), f.name, width, height, needed,
+        )
     if f == PicaFormat.ETC1:
         return _decode_etc1(data, width, height)
     if f == PicaFormat.ETC1A4:
