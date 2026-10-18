@@ -112,6 +112,11 @@ def _has_texture_payload(data: bytes) -> bool:
         return True
     if len(data) >= 0x28 and data[-0x28:-0x24] in BFLIM_FOOTERS:
         return True
+    # Pokemon X/Y/ORAS wrap BCH in a PC/PT/GR shell; USUM stores raw PICA
+    # pixels in a PC/PT/MM section container. Neither starts with a standard
+    # magic, and dropping them here is why those GARCs decoded to nothing.
+    if data[:2] in (b"PC", b"PT", b"MM", b"GR"):
+        return True
     return False
 
 
@@ -177,6 +182,26 @@ def extract_textures(
     if tex is not None:
         yield from tex.plugin.iter_textures(data, path)
         return
+
+    # Pokemon PC/PT/MM section containers and the older PC/PT/GR BCH wrapper.
+    # Not a registered texture plugin: the magic is two bytes and the body is
+    # either raw pixels or a standard container we already know how to walk.
+    if data[:2] in (b"PC", b"PT", b"MM", b"GR"):
+        from tex_forge.pipeline.adapters import (
+            parse_pokemon_pc_v5,
+            unwrap_pokemon_container,
+        )
+        pc_textures = parse_pokemon_pc_v5(data, path)
+        if pc_textures:
+            yield from pc_textures
+            return
+        unwrapped = unwrap_pokemon_container(data)
+        if unwrapped is not None:
+            yield from extract_textures(
+                unwrapped, path + "[unwrap]",
+                title_id=title_id, scan_all=scan_all, depth=depth + 1,
+            )
+            return
 
     # --- Embedded-magic scan (last resort, only when explicitly requested) ---
     if scan_all:
