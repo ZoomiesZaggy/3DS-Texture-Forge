@@ -22,6 +22,7 @@ We BFS-walk the tree once at parse time, building a flat list of
 from __future__ import annotations
 
 import logging
+from collections import deque
 from typing import List, Optional, Tuple
 
 from tex_forge.core.binio import (
@@ -122,10 +123,10 @@ class RomFSParser:
         seen_dirs: set[int] = set()
         seen_files: set[int] = set()
         # (dir_entry_offset, parent_path)
-        queue: list[Tuple[int, str]] = [(0, "")]
+        queue: deque[Tuple[int, str]] = deque([(0, "")])
 
         while queue:
-            entry_off, parent = queue.pop(0)
+            entry_off, parent = queue.popleft()
             if entry_off in seen_dirs:
                 continue
             seen_dirs.add(entry_off)
