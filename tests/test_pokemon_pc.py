@@ -65,8 +65,50 @@ def test_lz_wrapped_pc_is_not_rejected():
 def test_legacy_gr_wrapper_points_at_inner_bch():
     from tex_forge.pipeline.adapters import unwrap_pokemon_container
     # unwrap_pokemon_container ignores buffers shorter than 0x84.
+    # This file stores the BCH offset at byte 4 (the previous Forge read).
+    # The u32 at byte 8 is the BCH magic itself, so Ohana's +0x08 slot does
+    # not steal it.
     inner = b"BCH\x00" + b"\x11" * 16
     blob = b"GR\x00\x00" + struct.pack("<I", 8) + inner
     blob = blob.ljust(0x84, b"\x00")
     assert unwrap_pokemon_container(blob) == blob[8:]
     assert _has_texture_payload(blob) is True
+
+
+def test_ohana_gr_offset_at_8_beats_a_plausible_offset_at_4():
+    from tex_forge.pipeline.adapters import unwrap_pokemon_container
+    # Ohana.vb reads the GR BCH offset from 0x08. Both slots point at a
+    # BCH magic here; 0x08 is the one the loader uses.
+    blob = bytearray(0x84)
+    blob[0:2] = b"GR"
+    struct.pack_into("<I", blob, 4, 0x10)
+    struct.pack_into("<I", blob, 8, 0x30)
+    blob[0x10:0x14] = b"BCH\x00"
+    blob[0x30:0x34] = b"BCH\x00"
+    assert unwrap_pokemon_container(bytes(blob)) == bytes(blob[0x30:])
+
+
+def test_mm_and_tm_wrappers_unwrap_bch_at_0x80():
+    from tex_forge.pipeline.adapters import unwrap_pokemon_container
+    for magic in (b"MM", b"TM", b"PC", b"PT"):
+        blob = bytearray(0x90)
+        blob[0:2] = magic
+        blob[0x80:0x84] = b"BCH\x00"
+        blob[0x84:] = b"\x5A" * 12
+        assert unwrap_pokemon_container(bytes(blob)) == bytes(blob[0x80:])
+        assert _has_texture_payload(bytes(blob)) is True
+
+
+def test_mm_section_container_is_not_stolen_by_the_bch_unwrap():
+    # A USUM MM/PC section file is parsed as pixels. A BCH-shaped tail
+    # must not replace that result.
+    pixels = bytes((i * 7) & 0xFF for i in range(8 * 8 * 4))
+    blob = bytearray(_pc_blob(8, 8, 4, pixels))
+    blob[0:2] = b"MM"
+    if len(blob) < 0x84:
+        blob.extend(b"\x00" * (0x84 - len(blob)))
+    blob[0x80:0x84] = b"BCH\x00"
+    found = list(extract_textures(bytes(blob), "a/0/8/3"))
+    assert len(found) == 1
+    assert found[0].parser_used == "pokemon_pc_v5"
+    assert found[0].data == pixels
