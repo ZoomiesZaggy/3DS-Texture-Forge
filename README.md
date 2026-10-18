@@ -202,17 +202,25 @@ The format docs scattered across the codebase point at:
 - ZAR (Grezzo) docs: https://wiki.cloudmodding.com/oot/3D:ZAR_format
 - Level-5 .xi / IMGC notes: https://gbatemp.net/threads/level5-xi-file-format.458349/
 
+## Install
+
+```
+pip install -e .
+```
+
+Runtime dependencies are numpy, Pillow, and xxhash (`requirements.txt` matches `pyproject.toml`). Azahar filename hashes use CityHash64. A pure-Python implementation is bundled and is byte-exact, but about 100x slower than the native module. For a large extract, install the optional extra:
+
+```
+pip install -e ".[cityhash]"
+```
+
 ## Tests
 
 ```
 python3 -m pytest tests/ -v
 ```
 
-94 tests cover: morton tables vs. mathematical definition, every PICA200 format
-decoding zero-input cleanly, all compressors round-tripping known inputs
-(including hand-built CRILAYLA streams), archive detection and priority order,
-output writers (manifest / failures / summary / quality report), pack-builder
-staging mode, and pipeline graceful-failure paths, multi-content CIA chunk-record parsing, and the multi-content extraction pipeline (per-content manifest tagging, shared dedup, path namespacing), the loader's encrypted-signal handling + GUI multi-content wiring, and Azahar drop-in correctness (CityHash64 filenames, _mip0 suffix, minimal use_new_hash=false pack.json), plus regression coverage for the normal-mode filename collision fix, dump-raw, list-files, cooperative cancellation, and BFLIM tail-peek detection.
+The suite covers morton tables vs. the mathematical definition, every PICA200 format (including numpy-vs-python parity on random data), compressors round-tripping known inputs (including hand-built CRILAYLA streams), archive detection, output writers, pack-builder staging mode, pipeline failure paths, multi-content CIA extraction, Azahar filename hashes (legacy decoded buffer, not the raw GPU bytes) and `pack.json` options, Pokemon PC containers, the normal-mode filename collision fix, dump-raw, list-files, cancellation, and BFLIM tail-peek detection.
 
 ## Status
 
@@ -222,16 +230,17 @@ staging mode, and pipeline graceful-failure paths, multi-content CIA chunk-recor
 - ✅ All texture container parsers from v1 ported (12 plugins; BCH/CGFX/CTPK/CTXB/CMB/BFLIM/jIMG/Shinen/STEX/Capcom-TEX/GDB1/IMGC)
 - ✅ Level-5 flat archive (Fantasy Life) restored: entries are LZ-decompressed and scanned for the CGFX/BCH/CTPK/CTXB container embedded behind the resource header. Fantasy Life extracts 10,254 textures again (matches the v1 reference exactly)
 - ✅ Level-5 Huffman child-offset corrected (byte-vs-word + alignment base) and moved off the pure-Python per-bit path (numpy bit pre-expansion, python fallback retained). Cross-checked byte-for-byte against an independent from-GBATEK-spec decoder. Note: no reachable ROM exercises this path (Fantasy Life uses LZ11 + CGFX, not Huffman), so it has no on-ROM validation yet
-- 🟡 Azahar lookup hash now covers the mip0 surface only. The emitted hash equals CityHash64 of the mip0 surface (independently reproduced with the native `cityhash` C extension: cobKoopaCastle 64x256 ETC1 mip0 = `99D5874C5F9C5F8C`). That CityHash64-of-mip0 is what the code audit identifies as Azahar's lookup key, but the end-to-end emulator match is unconfirmed pending an in-emulator load test. Single-surface textures are unchanged
+- ✅ Azahar packs pin `options.use_new_hash: false` and name files with CityHash64 of the **decoded** legacy buffer (bottom-up, the buffer `ComputeHash` hashes in that mode), over the mip0 surface only. Hashing the raw tiled GPU bytes is the newer mode and was the mismatch behind issue #5 (ACNL `5CD871E00172EFB8` vs Forge's raw `55CD354EACC9659B`)
 - ✅ CLI parity with v1: `extract`, `scan`, `report`, `build-pack`, `import-dump`
 - ✅ Multi-content CIA extraction: `extract` walks content 0 + update/DLC CFAs, tags each manifest record with `source_content`, shares dedup across contents; the GUI (scan + extract) is multi-content aware too
 - ✅ GUI uses the new pipeline (vendored v1 UI for now)
 - ✅ Manifest writer (schema v2), failures.json, unknown_files.json, summary.json
 - ✅ Quality report (JSON + TXT) with format-aware suspicion thresholds
 - ✅ Contact sheet generator
-- ✅ Pack builder (azahar / mapped / staging). Azahar packs are drop-in: `tex1_<W>x<H>_<CityHash64>_<code>_mip0.png` filenames + a minimal `pack.json` pinning `use_new_hash: false` (legacy hash); Forge's own metadata lives in `forge_pack_meta.json` so it never collides with Azahar's pack config
+- ✅ Pack builder (azahar / mapped / staging). Azahar packs are drop-in: `tex1_<W>x<H>_<CityHash64>_<code>_mip0.png` filenames + a `pack.json` Azahar's `ReadConfig` accepts (`options.use_new_hash: false`, `options.flip_png_files: true`, empty `textures`). Forge's own metadata lives in `forge_pack_meta.json`
 - 🔧 Deferred: teaching the CGFX parser to report the real `mip0_size` / `mip_count` so the manifest is honest (the Azahar hash-site slice is the correct fix in the meantime)
 - 🔧 Deferred gate: the Level-5 Huffman correctness and perf changes are unit-tested against canonical fixtures and an independent decoder, but no reachable ROM exercises the path (a full Fantasy Life extraction was instrumented and made 0 Huffman calls), so the on-ROM wall-clock gate is still outstanding (see `docs/CODE_OVERVIEW.md`)
-- 🟡 Deferred confirmation: the Azahar mip0 hash matches Azahar in-emulator (drop the pack in and confirm the previously-missing textures load); the hash math is independently verified but the emulator round-trip is not
+- 🟡 Deferred confirmation: an in-emulator load of a pack built with the legacy decoded hash (the math matches Azahar's `ComputeHash` on current master; nobody has dropped a pack into Azahar in this pass)
+- ✅ Pokemon PC/PT/MM section containers and the older PC/PT/GR BCH wrapper are decoded, including when the blob is LZ-compressed inside a GARC. Gen 7 map and UI assets that are not in those containers are still unsupported (issue #3)
 
-The reference v1 codebase still lives at `outputs/reference/3DS-Texture-Forge-1.1/`.
+The v1.1 sources used to be vendored at `outputs/reference/3DS-Texture-Forge-1.1/` for audits. That tree has been removed. The project is MIT-licensed; see `LICENSE`.
