@@ -364,8 +364,8 @@ class ExtractionPipeline:
         source_content: str = "",
     ) -> tuple[bool, bool]:
         """Process one Texture. Returns (ok, was_suspicious)."""
-        from tex_forge.textures.formats import name as fmt_name, FORMAT_BPP
-        from tex_forge.textures.azahar_hash import azahar_hash_hex
+        from tex_forge.textures.formats import name as fmt_name
+        from tex_forge.textures.azahar_hash import azahar_legacy_hash_hex
 
         tex_id = f"tex_{tex_idx:04d}"
         notes_str = "; ".join(tex.notes)
@@ -379,27 +379,29 @@ class ExtractionPipeline:
             })
             return False, False
 
-        # Azahar runtime lookup hash (CityHash64 of the raw GPU bytes).
-        # Computed once and attached to the manifest in both code paths
-        # below, so build-pack can produce drop-in packs offline.
-        #
-        # Azahar hashes the mip0 surface ONLY. For a CGFX texture carrying a
-        # mip chain, tex.data is the full concatenated mip0..mipN payload (the
-        # CGFX parser reports the whole data_size and hardcodes mip_count=1), so
-        # hashing all of it never matches. Slice to the mip0 surface first:
-        # width * height * bpp / 8. 3DS dimensions are multiples of 8 and the
-        # parsers emit storage (padded) dims, so this equals len(tex.data) for
-        # single-surface textures (BFLIM/CTPK/etc. -- a no-op) and trims the
-        # trailing mips only for mipped payloads. Fall back to the whole buffer
-        # if the computed size is implausible or exceeds the data we actually
-        # have.
-        _bpp = FORMAT_BPP.get(int(tex.format), 0)
-        _mip0_size = (tex.width * tex.height * _bpp) // 8
-        _hash_src = (tex.data[:_mip0_size]
-                     if 0 < _mip0_size <= len(tex.data) else tex.data)
-        azahar_h = azahar_hash_hex(_hash_src) or ""
+        # Legacy Azahar lookup hash. Packs pin use_new_hash=false, and that
+        # mode CityHash64's the decoded linear buffer (bottom-up, native
+        # packing for color formats, RGBA8 for texture formats) -- not the
+        # tiled GPU bytes. decode() reads one surface of (width, height), so
+        # a CGFX mip chain concatenated after mip0 is ignored here the same
+        # way Azahar hashes each uploaded level on its own. The pre-crop
+        # image is the storage surface Azahar uploads; BFLIM display crops
+        # happen after the hash is taken.
+        try:
+            rgba = decode(tex.data, tex.width, tex.height, tex.format)
+        except Exception as e:
+            rgba = None
+            decode_err = str(e)
+            logger.debug("decode failed for %s", tex.source_file, exc_info=True)
+        else:
+            decode_err = ""
 
-        # list_only: record what was found, skip decode / quality / PNG.
+        azahar_h = ""
+        if rgba is not None:
+            azahar_h = azahar_legacy_hash_hex(rgba, int(tex.format)) or ""
+
+        # list_only: record what was found, skip quality / PNG. The decode
+        # above already ran so the legacy hash is filled in.
         if self.options.list_only:
             self.records.append(make_record(
                 tex_id=tex_id,
@@ -448,14 +450,6 @@ class ExtractionPipeline:
             ))
             return True, False
 
-        # Decode
-        try:
-            rgba = decode(tex.data, tex.width, tex.height, tex.format)
-        except Exception as e:
-            rgba = None
-            decode_err = str(e)
-        else:
-            decode_err = ""
         if rgba is None:
             self.failures.append({
                 "id": tex_id, "source_file_path": tex.source_file,
@@ -557,8 +551,8 @@ class ExtractionPipeline:
                            tex_idx: int = 0) -> str:
         if self.options.output_mode == "azahar":
             # Drop-in Azahar naming: tex1_<W>x<H>_<CityHash64>_<code>_mip0.png.
-            # MUST use the CityHash64 (Azahar's legacy lookup hash), never a
-            # different algorithm, or the emulator silently won't match it.
+            # The hash is the legacy decoded-buffer CityHash64 (the mode
+            # pack.json pins). A raw-byte hash will not match.
             # Routed through azahar_filename so this is byte-identical to what
             # build-pack emits. All contents share one flat tree; identical
             # textures collapse to the same filename, which is what Azahar wants.

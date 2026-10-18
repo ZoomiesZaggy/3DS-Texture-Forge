@@ -2,10 +2,10 @@
 
 Three modes:
   azahar  -- the manifest carries `azahar_hash_cityhash64` for each
-             texture (computed offline at extract time via CityHash64
-             of the raw GPU bytes). Output is a drop-in pack with
-             `tex1_<W>x<H>_<HASH>_<code>.png` filenames; no emulator
-             dump required.
+             texture (CityHash64 of the decoded legacy buffer, the
+             hash Azahar uses when use_new_hash is false). Output is a
+             drop-in pack with `tex1_<W>x<H>_<HASH>_<code>_mip0.png`
+             filenames; no emulator dump required.
   mapped  -- legacy import-dump path. If runtime-dumped hashes are
              available (`dump_hash` field), uses those to produce a
              working pack with `<hash>.png` filenames.
@@ -22,16 +22,21 @@ Pack folder structure follows the Azahar/Citra convention:
     tex1_<W>x<H>_<HASH>_<code>_mip0.png   (azahar mode, drop-in)
     <hash>.png                            (mapped mode, drop-in)
     <readable_name>.png                   (staging mode, not drop-in)
-    pack.json                             (azahar/mapped: minimal Azahar
-                                           config pinning use_new_hash=false)
+    pack.json                             (azahar/mapped: Azahar config.
+                                           options.use_new_hash=false)
     forge_pack_meta.json                  (Forge's own audit metadata --
                                            mappings, counts, mode declaration)
 
-The Azahar `pack.json` is deliberately minimal: it carries only name/author/
-description and `use_new_hash: false`. Forge's verbose metadata lives in
-`forge_pack_meta.json` so it never gets parsed as Azahar's pack config (a
-large pack.json can crash Azahar, and the wrong schema could flip it to the
-new hash that Forge's legacy-hash filenames don't match).
+Azahar reads ``pack.json`` as ``options.skip_mipmap``, ``options.flip_png_files``,
+``options.use_new_hash``, then iterates ``textures`` (see
+``CustomTexManager::ReadConfig``). A top-level ``use_new_hash`` is ignored, and
+a missing ``options`` / ``textures`` object throws, so the file Forge writes
+uses that schema with an empty ``textures`` map (filenames carry the hashes).
+``use_new_hash`` stays false because the filename hash is the legacy decoded
+buffer. ``flip_png_files`` stays true because Forge PNGs are top-down, same
+as Azahar's own dumps, and the loader flips them into OpenGL orientation.
+Forge's verbose metadata lives in ``forge_pack_meta.json`` so a large mappings
+dict never gets parsed as Azahar's pack config.
 
 Optional `upscaled_dir` parameter: if provided, the pack ships PNGs
 from that directory instead of the originals -- handy for shipping a
@@ -262,21 +267,25 @@ def build_pack(
     with open(forge_meta_path, "w", encoding="utf-8") as f:
         json.dump(pack_meta, f, indent=2)
 
-    # For genuine drop-in packs, write a minimal Azahar-schema pack.json that
-    # pins the legacy hash. This is tiny (no mappings dict) so it can't trip
-    # the large-pack.json crash, and it's explicit: Forge stores the OLD
-    # (CityHash64-over-upload-data) hash in every filename. If Azahar somehow
-    # failed to parse it, it would fall back to "legacy defaults" -- also the
-    # old hash -- so every outcome resolves to the hash our filenames use.
+    # Drop-in packs get the schema ReadConfig actually parses. use_new_hash
+    # is false because filenames are CityHash64 of the decoded legacy buffer.
+    # textures is an empty object: Azahar also parses the hash out of each
+    # tex1_* filename, and a missing textures key throws.
     if mode in ("azahar", "mapped"):
         azahar_config = {
             "name": f"3DS Texture Forge pack {title_id}",
             "author": "3DS Texture Forge",
             "description": (
-                "Extracted with 3DS Texture Forge. Uses the legacy (old) "
-                "texture hash; do not enable use_new_hash for this pack."
+                "Extracted with 3DS Texture Forge. Filenames use the legacy "
+                "hash (CityHash64 of the decoded texture). Leave "
+                "options.use_new_hash false."
             ),
-            "use_new_hash": False,
+            "options": {
+                "skip_mipmap": False,
+                "flip_png_files": True,
+                "use_new_hash": False,
+            },
+            "textures": {},
         }
         with open(os.path.join(pack_dir, "pack.json"), "w", encoding="utf-8") as f:
             json.dump(azahar_config, f, indent=2)

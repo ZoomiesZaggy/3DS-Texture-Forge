@@ -5,7 +5,7 @@ Covers:
     size in the same source dir must get DISTINCT paths (previously every one
     was named tex_0000_... and silently overwrote the last).
   * dump_raw: raw GPU bytes land under raw/ and the manifest records the path.
-  * list_only: manifest written, nothing decoded, no PNGs on disk.
+  * list_only: manifest written, no PNGs on disk.
   * cancel_event: a set event stops the run and marks summary["canceled"].
   * FileFilter tail peek: BFLIM footers (magic at file end) are now reachable.
 
@@ -140,9 +140,14 @@ def test_cancel_event_stops_run_and_marks_summary(patched):
 
 
 def test_azahar_hash_covers_mip0_only_for_mipped_texture(monkeypatch):
-    """A mipped payload (data longer than the mip0 surface) must be hashed over
-    the mip0 slice only; a single-surface texture must hash the whole buffer."""
-    from tex_forge.textures.azahar_hash import azahar_hash_hex, is_available
+    """A mipped payload must be hashed as the decoded mip0 surface, not the
+    raw tiled bytes and not the trailing mip chain."""
+    from tex_forge.textures.azahar_hash import (
+        azahar_hash_hex,
+        azahar_legacy_hash_hex,
+        is_available,
+    )
+    from tex_forge.textures.decoder import decode
 
     if not is_available():
         pytest.skip("no CityHash64 backend")
@@ -174,14 +179,20 @@ def test_azahar_hash_covers_mip0_only_for_mipped_texture(monkeypatch):
         mipped_rec = next(r for r in recs if r["width"] == 64)
         single_rec = next(r for r in recs if r["width"] == 8)
 
-        # mipped: hash is over mip0 (2048), NOT the full 2748-byte buffer
-        assert mipped_rec["azahar_hash_cityhash64"] == azahar_hash_hex(mip0)
+        mip0_rgba = decode(mip0, 64, 64, int(PicaFormat.ETC1))
+        single_rgba = decode(single_data, 8, 8, int(PicaFormat.RGBA8))
+        # Legacy hash is the decoded mip0 image. decode() stops at the mip0
+        # surface, so the trailing mip bytes do not change it, and it is not
+        # CityHash64 of the raw tiled bytes (issue #5).
+        assert mipped_rec["azahar_hash_cityhash64"] == azahar_legacy_hash_hex(
+            mip0_rgba, int(PicaFormat.ETC1))
+        assert mipped_rec["azahar_hash_cityhash64"] != azahar_hash_hex(mip0)
         assert mipped_rec["azahar_hash_cityhash64"] != azahar_hash_hex(mipped_data)
-        # but the recorded raw size is still the whole buffer
         assert mipped_rec["raw_data_size"] == len(mipped_data)
 
-        # single surface: unchanged, whole buffer hashed
-        assert single_rec["azahar_hash_cityhash64"] == azahar_hash_hex(single_data)
+        assert single_rec["azahar_hash_cityhash64"] == azahar_legacy_hash_hex(
+            single_rgba, int(PicaFormat.RGBA8))
+        assert single_rec["azahar_hash_cityhash64"] != azahar_hash_hex(single_data)
 
 
 def test_filter_tail_peek_catches_bflim_footer():
