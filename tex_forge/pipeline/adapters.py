@@ -153,18 +153,34 @@ _PC_FORMAT_TO_PICA = {
 }
 
 
+# Magics Ohana3DS accepts before it looks for an embedded BCH model.
+# dnasdw/Ohana3DS Ohana.vb Load_Model: MM, TM, PC, GR (plus bare BCH).
+_GF_MODEL_MAGICS = (b"PC", b"PT", b"MM", b"GR", b"TM")
+
+
 def unwrap_pokemon_container(data: bytes) -> Optional[bytes]:
-    """Older Pokemon games (X/Y, OR/AS) wrap inner BCH in a thin PC/PT/GR shell."""
+    """Peel a Game Freak PC/PT/MM/GR/TM shell off the inner BCH model.
+
+    Ohana3DS (``Ohana.vb`` ``Load_Model``) checks for ``BCH`` at 0x80 first,
+    for every one of those magics. GR maps that do not keep the model there
+    store the BCH offset as a u32 at 0x08. An earlier Forge build read that
+    offset from 0x04; both are accepted, and 0x08 wins when it actually
+    points at ``BCH``.
+    """
     if len(data) < 0x84:
         return None
     magic2 = data[:2]
-    if magic2 in (b"PC", b"PT"):
-        if data[0x80:0x84] == b"BCH\x00":
-            return data[0x80:]
-    elif magic2 == b"GR":
-        bch_off = struct.unpack_from("<I", data, 4)[0]
-        if 0 < bch_off < len(data) and data[bch_off:bch_off + 4] == b"BCH\x00":
-            return data[bch_off:]
+    if magic2 not in _GF_MODEL_MAGICS:
+        return None
+    if data[0x80:0x84] == b"BCH\x00":
+        return data[0x80:]
+    if magic2 == b"GR":
+        # 0x08 is Ohana's GR offset. 0x04 is the previous Forge read, kept
+        # so files that were built against that layout still unwrap.
+        for off in (8, 4):
+            bch_off = struct.unpack_from("<I", data, off)[0]
+            if 0 < bch_off < len(data) - 4 and data[bch_off:bch_off + 4] == b"BCH\x00":
+                return data[bch_off:]
     return None
 
 

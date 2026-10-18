@@ -25,7 +25,9 @@ dependencies = [
 [project.optional-dependencies]
 gui = ["PySide6>=6.6"]
 build = ["pyinstaller>=6.0"]
-dev = ["pytest>=7.0"]
+dev = ["pytest>=7.0", "ruff==0.17.1"]
+# Native CityHash64. The pure-Python fallback is byte-exact but ~100x slower.
+cityhash = ["cityhash"]
 
 [project.scripts]
 tex-forge = "tex_forge.cli:main"
@@ -35,3 +37,15 @@ tex-forge-gui = "tex_forge.gui.entry:main"
 
 [tool.setuptools.packages.find]
 include = ["tex_forge*"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+extend-exclude = ["outputs"]
+
+[tool.ruff.lint]
+# Correctness only. The tree has hundreds of pre-existing style findings
+# (line length, import order, naming); this selection does not require
+# cleaning those up. E9 is syntax errors, F63/F7/F82 are pyflakes bugs
+# (invalid literals, default-mutable, undefined names).
+select = ["E9", "F63", "F7", "F82"]

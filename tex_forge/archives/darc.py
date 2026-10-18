@@ -87,4 +87,4 @@ class _DARC:
         try:
             yield from _iter(data)
         except Exception as e:
-            logger.warning("darc parse error: %s", e)
+            logger.warning("darc parse error: %s", e, exc_info=True)

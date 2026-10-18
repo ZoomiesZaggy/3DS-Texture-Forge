@@ -2,9 +2,9 @@
 
 Three modes:
   azahar  -- the manifest carries `azahar_hash_cityhash64` for each
-             texture (CityHash64 of the raw GPU bytes, computed
+             texture (CityHash64 of the decoded legacy buffer, computed
              offline at extract time). Drop-in pack with
-             `tex1_<W>x<H>_<HASH>_<code>.png` filenames; no emulator
+             `tex1_<W>x<H>_<HASH>_<code>_mip0.png` filenames; no emulator
              dump needed.
   mapped  -- legacy import-dump path: if the manifest has dump_hash
              entries (added by import-dump), emit one <hash>.png per

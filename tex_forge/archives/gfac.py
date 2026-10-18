@@ -62,7 +62,7 @@ def _decompress_gfcp(data: bytes, offset: int, expected_size: int) -> bytes:
             if out:
                 return out
         except Exception:
-            pass
+            logger.debug("GFAC LZ probe failed", exc_info=True)
     return b""
 
 
@@ -126,4 +126,4 @@ class _GFAC:
         try:
             yield from _iter(data)
         except Exception as e:
-            logger.warning("GFAC parse error: %s", e)
+            logger.warning("GFAC parse error: %s", e, exc_info=True)

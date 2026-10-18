@@ -5,12 +5,13 @@ hash or format code is even slightly wrong simply never matches Azahar's
 runtime lookup, so the replacement is ignored with no error. We lock:
 
   * azahar_filename emits the dumper-exact `..._<code>_mip0.png` shape.
-  * `extract --output-mode azahar` names files by CityHash64 (Azahar's
-    legacy lookup hash) -- NOT xxhash, the bug this replaced -- and produces
-    byte-identical names to build-pack.
-  * build-pack ships a tiny Azahar pack.json pinning use_new_hash=false, with
-    Forge's verbose metadata kept out of pack.json (so it can neither flip
-    Azahar to the new hash nor trip the large-pack.json crash).
+  * `extract --output-mode azahar` names files by CityHash64 of the decoded
+    legacy buffer (what Azahar hashes when use_new_hash is false) -- NOT the
+    raw tiled bytes, and NOT xxhash -- and produces byte-identical names to
+    build-pack.
+  * build-pack ships a tiny Azahar pack.json whose options.use_new_hash is
+    false (the schema ReadConfig actually reads), with Forge's verbose
+    metadata kept out of pack.json.
 """
 
 import json
@@ -25,7 +26,12 @@ from tex_forge.core.types import Texture
 from tex_forge.output import save_png
 from tex_forge.output.pack_builder import build_pack
 from tex_forge.pipeline.extractor import ExtractionPipeline, ExtractOptions
-from tex_forge.textures.azahar_hash import azahar_filename, azahar_hash_hex
+from tex_forge.textures.azahar_hash import (
+    azahar_filename,
+    azahar_hash_hex,
+    azahar_legacy_hash_hex,
+)
+from tex_forge.textures.decoder import decode
 from tex_forge.textures.formats import PicaFormat
 
 
@@ -104,8 +110,13 @@ def test_extract_azahar_names_by_cityhash_not_xxhash(monkeypatch):
     with tempfile.TemporaryDirectory() as td:
         rec = _run_azahar(monkeypatch, td, blob)
 
-    city = azahar_hash_hex(blob)
+    rgba = decode(blob, 8, 8, int(PicaFormat.RGBA8))
+    city = azahar_legacy_hash_hex(rgba, int(PicaFormat.RGBA8))
     assert rec["azahar_hash_cityhash64"] == city
+    # Issue #5: legacy mode does not hash the tiled GPU bytes. Those two
+    # hashes diverged on a real ACNL ETC1A4 dump (decoded 5CD871E00172EFB8,
+    # raw 55CD354EACC9659B).
+    assert rec["azahar_hash_cityhash64"] != azahar_hash_hex(blob)
 
     expected = azahar_filename(8, 8, int(city, 16), "RGBA8")
     assert os.path.basename(rec["decoded_png_path"]) == expected
@@ -137,13 +148,54 @@ def test_build_pack_azahar_config_and_filenames():
         # Azahar config: tiny, pins legacy hash, kept separate from Forge meta.
         cfg_path = os.path.join(pack_dir, "pack.json")
         cfg = json.load(open(cfg_path))
-        assert cfg["use_new_hash"] is False
+        # Azahar ReadConfig requires these keys under options, plus a textures
+        # object. A top-level use_new_hash is ignored and a missing options
+        # object throws.
+        assert cfg["options"]["use_new_hash"] is False
+        assert cfg["options"]["flip_png_files"] is True
+        assert cfg["options"]["skip_mipmap"] is False
+        assert cfg["textures"] == {}
+        assert "use_new_hash" not in cfg
         assert "name" in cfg and "author" in cfg
         assert os.path.getsize(cfg_path) < 2000          # nowhere near the crash size
         assert os.path.isfile(os.path.join(pack_dir, "forge_pack_meta.json"))
 
         # The shipped PNG is named exactly as Azahar will look it up.
         assert os.path.isfile(os.path.join(pack_dir, azahar_filename(8, 8, int(h, 16), "RGBA8")))
+
+
+def test_legacy_hash_buffer_matches_azahar_layout():
+    """Lock the byte layout ComputeHash hashes when use_new_hash is false.
+
+    Color formats stay in native GPU order; ETC expands to RGBA. Both are
+    stored bottom-up. The raw tiled bytes are a different hash (issue #5).
+    """
+    from tex_forge.textures.azahar_hash import legacy_hash_input
+    from tex_forge.textures.formats import encoded_size
+
+    rng = np.random.default_rng(5)
+    raw = rng.integers(0, 256, size=8 * 8 * 4, dtype=np.uint8).tobytes()
+    rgba = decode(raw, 8, 8, int(PicaFormat.RGBA8))
+    expected = np.ascontiguousarray(rgba[::-1][..., [3, 2, 1, 0]]).tobytes()
+    assert legacy_hash_input(rgba, int(PicaFormat.RGBA8)) == expected
+    assert azahar_legacy_hash_hex(rgba, int(PicaFormat.RGBA8)) == azahar_hash_hex(expected)
+    assert azahar_hash_hex(expected) != azahar_hash_hex(raw)
+
+    etc = rng.integers(0, 256, size=encoded_size(16, 16, int(PicaFormat.ETC1A4)), dtype=np.uint8).tobytes()
+    etc_rgba = decode(etc, 16, 16, int(PicaFormat.ETC1A4))
+    etc_expected = np.ascontiguousarray(etc_rgba[::-1]).tobytes()
+    assert legacy_hash_input(etc_rgba, int(PicaFormat.ETC1A4)) == etc_expected
+    assert azahar_hash_hex(etc_expected) != azahar_hash_hex(etc)
+
+    a8 = rng.integers(0, 256, size=encoded_size(8, 8, int(PicaFormat.A8)), dtype=np.uint8).tobytes()
+    a8_rgba = decode(a8, 8, 8, int(PicaFormat.A8))
+    flipped = a8_rgba[::-1]
+    azahar_a8 = np.zeros_like(flipped)
+    azahar_a8[..., 3] = flipped[..., 3]
+    assert legacy_hash_input(a8_rgba, int(PicaFormat.A8)) == np.ascontiguousarray(azahar_a8).tobytes()
+    # Forge's A8 preview fills RGB with 255; Azahar's hash buffer does not.
+    assert int(a8_rgba[..., 0].max()) == 255
+    assert int(azahar_a8[..., 0].max()) == 0
 
 
 def test_build_pack_staging_has_no_azahar_pack_json():

@@ -154,6 +154,7 @@ def _read_cstr(data: bytes, off: int) -> str:
     try:
         return data[off:end].decode('ascii', errors='replace')
     except Exception:
+        logger.debug("CPK string decode failed at offset %s", off, exc_info=True)
         return ""
 
 

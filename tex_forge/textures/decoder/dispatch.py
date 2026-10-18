@@ -11,12 +11,20 @@ tex_forge.textures.decoder.__init__ pulls them both in eagerly.
 
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 import numpy as np
 
 from tex_forge.textures.decoder.pica_numpy import decode_numpy
 from tex_forge.textures.decoder.pica_python import decode_python
+
+logger = logging.getLogger(__name__)
+
+#: Refuse absurd dimensions before allocating the output image. 8192 covers
+#: every real 3DS surface (the GPU's practical max is well under this) and
+#: stops a corrupt header from asking for a multi-gigabyte decode.
+MAX_TEXTURE_DIMENSION = 8192
 
 
 def decode(data: bytes, width: int, height: int, fmt: int) -> Optional[np.ndarray]:
@@ -27,8 +35,15 @@ def decode(data: bytes, width: int, height: int, fmt: int) -> Optional[np.ndarra
 
     Tiny textures (W or H < 4) take the python path because the numpy
     morton tables don't tile cleanly below the 8x8 PICA tile size.
+    Width or height above MAX_TEXTURE_DIMENSION is rejected.
     """
     if width <= 0 or height <= 0:
+        return None
+    if width > MAX_TEXTURE_DIMENSION or height > MAX_TEXTURE_DIMENSION:
+        logger.warning(
+            "refusing %dx%d texture (limit %d per side)",
+            width, height, MAX_TEXTURE_DIMENSION,
+        )
         return None
 
     if width >= 4 and height >= 4:

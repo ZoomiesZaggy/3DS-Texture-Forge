@@ -17,6 +17,7 @@ Reference for the format internals:
 
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 import numpy as np
@@ -24,14 +25,24 @@ import numpy as np
 from tex_forge.textures.formats import PicaFormat, resolve
 from tex_forge.textures.morton import scatter_map, etc1_block_order
 
+logger = logging.getLogger(__name__)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _pad(data: bytes, needed: int) -> bytes:
-    """Right-pad with zeros so we can frombuffer a known size without bounds checks."""
+    """Right-pad with zeros so we can frombuffer a known size without bounds checks.
+
+    Short inputs used to be padded silently, which decodes as a valid image
+    with a zero tail. Log it so a truncated container is visible.
+    """
     if len(data) < needed:
+        logger.warning(
+            "texture data is short (%d bytes, decoder needs %d); zero-padding the tail",
+            len(data), needed,
+        )
         return data + bytes(needed - len(data))
     return data
 
@@ -412,5 +423,9 @@ def decode_numpy(data: bytes, width: int, height: int, fmt: int) -> Optional[np.
         return None
     try:
         return decoder(data, width, height)
-    except Exception:
+    except (ValueError, IndexError, TypeError, OverflowError, RuntimeError):
+        logger.debug(
+            "numpy decode failed for fmt=%s %dx%d (%d bytes); falling back",
+            f.name, width, height, len(data), exc_info=True,
+        )
         return None

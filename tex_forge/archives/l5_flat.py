@@ -98,6 +98,7 @@ def _entry_to_container(name: str, raw: bytes) -> ArchiveEntry:
         try:
             res = try_decompress(raw)
         except Exception:
+            logger.debug("Level-5 flat entry decompress failed", exc_info=True)
             res = None
         if res is not None and res.data and len(res.data) >= 8:
             work = res.data
@@ -133,4 +134,4 @@ class _L5Flat:
                 if container is not None:
                     yield container
         except Exception as e:
-            logger.warning("Level-5 flat parse error: %s", e)
+            logger.warning("Level-5 flat parse error: %s", e, exc_info=True)
