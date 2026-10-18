@@ -61,6 +61,7 @@ def _l5_lz10(data: bytes) -> bytes:
         out = decompress_lz(hdr + data[4:])
         return out or b""
     except Exception:
+        logger.debug("ARC0 LZ probe failed", exc_info=True)
         return b""
 
 
@@ -155,4 +156,4 @@ class _ARC0:
         try:
             yield from _iter(data)
         except Exception as e:
-            logger.warning("ARC0 parse error: %s", e)
+            logger.warning("ARC0 parse error: %s", e, exc_info=True)

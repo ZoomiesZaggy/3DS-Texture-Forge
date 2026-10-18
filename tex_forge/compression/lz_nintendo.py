@@ -238,7 +238,7 @@ class _LZ11:
         try:
             return _decompress_lz11(data)
         except Exception as e:  # pragma: no cover -- defensive
-            logger.debug("LZ11 decompress error: %s", e)
+            logger.debug("LZ11 decompress error: %s", e, exc_info=True)
             return None
 
 
@@ -255,7 +255,7 @@ class _LZ10:
         try:
             return _decompress_lz10(data)
         except Exception as e:
-            logger.debug("LZ10 decompress error: %s", e)
+            logger.debug("LZ10 decompress error: %s", e, exc_info=True)
             return None
 
 
@@ -272,7 +272,7 @@ class _LZ13:
         try:
             return _decompress_lz13(data)
         except Exception as e:
-            logger.debug("LZ13 decompress error: %s", e)
+            logger.debug("LZ13 decompress error: %s", e, exc_info=True)
             return None
 
 

@@ -19,10 +19,13 @@ Plugin contract:
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Callable, Iterator, List, Optional, Protocol, runtime_checkable
 
 from tex_forge.core.types import ArchiveEntry
+
+logger = logging.getLogger(__name__)
 
 
 @runtime_checkable
@@ -78,6 +81,7 @@ def detect_archive(data: bytes) -> Optional[_Registered]:
             if r.plugin.detect(data):
                 return r
         except Exception:  # pragma: no cover -- detect should never raise
+            logger.debug("archive detect raised for %s", r.name, exc_info=True)
             continue
     return None
 

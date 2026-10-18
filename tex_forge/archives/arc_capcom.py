@@ -59,7 +59,7 @@ def _detect_layout(data: bytes, eoff: int, idx: int, file_len: int) -> bool:
             if dec[:4] == b"TEX\x00":
                 return True
         except Exception:
-            pass
+            logger.debug("Capcom ARC self-field probe failed", exc_info=True)
 
     # Attempt 2: prev-entry fields.
     if idx > 0:
@@ -74,7 +74,7 @@ def _detect_layout(data: bytes, eoff: int, idx: int, file_len: int) -> bool:
                 if dec[:4] == b"TEX\x00":
                     return False
             except Exception:
-                pass
+                logger.debug("Capcom ARC prev-field probe failed", exc_info=True)
 
     return True  # default: self-fields layout
 
@@ -124,6 +124,7 @@ def _iter(data: bytes, tex_hash: int = MH4U_TEX_HASH) -> Iterator[ArchiveEntry]:
             raw = data[data_offset:data_offset + csize]
             dec = zlib.decompress(raw) if is_comp else raw
         except Exception:
+            logger.debug("Capcom ARC entry decompress failed", exc_info=True)
             continue
 
         if not dec or dec[:4] != b"TEX\x00":
@@ -150,4 +151,4 @@ class _CapcomARC:
         try:
             yield from _iter(data)
         except Exception as e:
-            logger.warning("Capcom ARC parse error: %s", e)
+            logger.warning("Capcom ARC parse error: %s", e, exc_info=True)

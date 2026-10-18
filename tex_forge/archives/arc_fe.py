@@ -76,4 +76,4 @@ class _FEArc:
         try:
             yield from _iter(data)
         except Exception as e:
-            logger.warning("FE ARC parse error: %s", e)
+            logger.warning("FE ARC parse error: %s", e, exc_info=True)

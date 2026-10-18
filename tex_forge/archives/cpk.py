@@ -39,7 +39,7 @@ def _iter(data: bytes) -> Iterator[ArchiveEntry]:
             if inner_data and len(inner_data) >= 4:
                 yield ArchiveEntry(name=inner_path, data=bytes(inner_data))
     except Exception as e:
-        logger.warning("CPK parse error: %s", e)
+        logger.warning("CPK parse error: %s", e, exc_info=True)
 
 
 @register_archive("cpk", priority=78, note="CRIWARE CPK (Persona Q, 7th Dragon)")

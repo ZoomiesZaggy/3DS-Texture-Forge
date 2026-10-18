@@ -101,4 +101,4 @@ class _SARC:
         try:
             yield from _iter(data)
         except Exception as e:
-            logger.warning("SARC parse error: %s", e)
+            logger.warning("SARC parse error: %s", e, exc_info=True)

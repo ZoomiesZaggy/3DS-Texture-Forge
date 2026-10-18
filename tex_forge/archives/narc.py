@@ -74,4 +74,4 @@ class _NARC:
         try:
             yield from _iter(data)
         except Exception as e:
-            logger.warning("NARC parse error: %s", e)
+            logger.warning("NARC parse error: %s", e, exc_info=True)

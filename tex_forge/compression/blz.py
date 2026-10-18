@@ -131,7 +131,7 @@ class _BLZ:
         try:
             return _decompress_blz(data)
         except Exception as e:
-            logger.debug("BLZ exception: %s", e)
+            logger.debug("BLZ exception: %s", e, exc_info=True)
             return None
 
 

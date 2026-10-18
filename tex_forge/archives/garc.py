@@ -102,7 +102,7 @@ def has_cgfx(data: bytes) -> bool:
             if entry.data[:4] == b"CGFX":
                 return True
     except Exception:
-        pass
+        logger.debug("GARC CGFX scan failed", exc_info=True)
     return False
 
 
@@ -117,4 +117,4 @@ class _GARC:
         try:
             yield from _iter(data)
         except Exception as e:
-            logger.warning("GARC parse error: %s", e)
+            logger.warning("GARC parse error: %s", e, exc_info=True)

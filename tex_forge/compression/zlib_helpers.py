@@ -60,5 +60,5 @@ class _GzipPrefix:
         try:
             return _gzip.decompress(data[4:])
         except Exception as e:
-            logger.debug("gzip-prefix decompress failed: %s", e)
+            logger.debug("gzip-prefix decompress failed: %s", e, exc_info=True)
             return None
